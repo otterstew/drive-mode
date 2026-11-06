@@ -448,6 +448,10 @@ body{display:flex; flex-direction:column; min-height:100dvh}
       <option value="0.9">Slower</option><option value="1" selected>Normal</option><option value="1.15">Faster</option>
     </select>
     <button class="o-btn" id="testVoice">Play a sample</button>
+    <label class="o-label" for="pause">How long a pause means you've finished</label>
+    <select class="o-field" id="pause">
+      <option value="short">Short (1 second)</option><option value="normal">Normal (2 seconds)</option><option value="long">Long (3 seconds, for thinking out loud)</option>
+    </select>
   </section>
 
   <section class="o-panel">
@@ -585,45 +589,94 @@ function fillVoices() {
 if (synth) synth.onvoiceschanged = fillVoices;
 $('voice').onchange = (e) => store.set('voice', e.target.value);
 $('rate').onchange = (e) => store.set('rate', Number(e.target.value));
+$('pause').value = store.get('pause', 'normal');
+$('pause').onchange = (e) => store.set('pause', e.target.value);
 $('testVoice').onclick = () => speak('This is how I will sound in the car.');
 
 // ---------- Listening ----------
-const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, quietCount = 0;
-function listen() {
-  if (!Rec) { $('said').textContent = 'This browser cannot listen. Open drive mode in Chrome.'; return; }
+// The phone records the audio itself and the server turns it into words
+// (better than Chrome's own dictation, which Stewart found poor). A simple
+// level check decides when he has stopped: a pause of PAUSE_MS after speech.
+// Tapping while listening sends straight away.
+const PAUSES = { short: 1200, normal: 2000, long: 3200 };
+const MAX_MS = 90000, WAIT_MS = 9000, RATE = 16000;
+let mic = null, recState = null, quietCount = 0;
+
+async function openMic() {
+  if (mic) return mic;
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  source.connect(node); node.connect(ctx.destination);
+  node.onaudioprocess = (e) => recState && onFrame(e.inputBuffer.getChannelData(0));
+  mic = { stream, ctx, node };
+  return mic;
+}
+function closeMic() {
+  if (!mic) return;
+  mic.stream.getTracks().forEach((t) => t.stop()); mic.ctx.close().catch(() => {}); mic = null;
+}
+
+function onFrame(samples) {
+  const r = recState, now = performance.now();
+  let sum = 0; for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  const level = Math.sqrt(sum / samples.length);
+  if (now - r.began < 400) { r.floor = Math.max(r.floor, level); }        // the car's own noise, first moment
+  const loud = level > Math.max(r.floor * 2.5, 0.012);
+  r.chunks.push(new Float32Array(samples));
+  if (loud) { r.lastLoud = now; if (!r.spoke) { r.spoke = true; r.firstLoud = now; } }
+  else if (!r.spoke) { while (r.chunks.length > 4) r.chunks.shift(); }     // keep a little lead-in only
+  const pause = PAUSES[store.get('pause', 'normal')] || PAUSES.normal;
+  if (r.spoke && now - r.lastLoud > pause) stopListening(true);
+  else if (!r.spoke && now - r.began > WAIT_MS) stopListening(false);
+  else if (now - r.began > MAX_MS) stopListening(true);
+}
+
+async function listen() {
   synth && synth.cancel();
-  rec = new Rec();
-  rec.lang = 'en-GB'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
-  let final = '';
-  rec.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) final += e.results[i][0].transcript; else interim += e.results[i][0].transcript;
-    }
-    $('heard').textContent = (final + interim).trim();
-  };
-  rec.onerror = (e) => { if (e.error === 'not-allowed') $('said').textContent = 'Drive mode needs the microphone. Allow it in Chrome\'s site settings.'; };
-  rec.onend = () => {
-    rec = null;
-    if (state !== 'listening') return;
-    const text = final.trim();
-    if (text) { quietCount = 0; ask(text); }
-    else if (session && ++quietCount < 2) listen();   // one more chance after a pause
-    else { quietCount = 0; setState('idle'); }
-  };
+  try { await openMic(); if (mic.ctx.state === 'suspended') await mic.ctx.resume(); }
+  catch { $('said').textContent = 'Drive mode needs the microphone. Allow it in Chrome\'s site settings.'; setState('idle'); return; }
+  recState = { began: performance.now(), floor: 0, spoke: false, lastLoud: 0, chunks: [], rate: mic.ctx.sampleRate };
   setState('listening'); $('heard').textContent = '';
-  rec.start();
+}
+function stopListening(send) {
+  const r = recState; recState = null;
+  if (!r || state !== 'listening') return;
+  if (send && r.spoke) return ask(toWav(r.chunks, r.rate));
+  if (session && ++quietCount < 2) return listen();   // one more chance after a quiet spell
+  quietCount = 0; setState('idle');
 }
 function stopAll() {
-  if (rec) { const r = rec; rec = null; try { r.abort(); } catch {} }
+  recState = null;
   synth && synth.cancel();
   if (state !== 'busy') setState('idle');
 }
 
+// Float samples at the phone's rate -> 16 kHz 16-bit mono WAV, base64.
+function toWav(chunks, rate) {
+  const total = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(total);
+  let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+  const step = rate / RATE, n = Math.floor(total / step), pcm = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * step), b = Math.min(total, Math.floor((i + 1) * step));
+    let v = 0; for (let j = a; j < b; j++) v += all[j]; v /= Math.max(1, b - a);
+    pcm[i] = Math.max(-1, Math.min(1, v)) * 0x7fff;
+  }
+  const buf = new ArrayBuffer(44 + pcm.length * 2), d = new DataView(buf);
+  const w = (p, t) => { for (let i = 0; i < t.length; i++) d.setUint8(p + i, t.charCodeAt(i)); };
+  w(0, 'RIFF'); d.setUint32(4, 36 + pcm.length * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true); d.setUint32(24, RATE, true);
+  d.setUint32(28, RATE * 2, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, 'data'); d.setUint32(40, pcm.length * 2, true);
+  new Int16Array(buf, 44).set(pcm);
+  const bytes = new Uint8Array(buf); let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
 $('talk').onclick = () => {
   primeSpeech();
-  if (state === 'listening') { rec && rec.stop(); return; }   // stop and send what was heard
+  if (state === 'listening') { recState && (recState.spoke ? stopListening(true) : stopListening(false)); return; }   // send what was heard
   if (state === 'speaking') { synth.cancel(); listen(); return; }
   if (state === 'idle') listen();
 };
@@ -631,18 +684,20 @@ let primed = false;
 function primeSpeech() { if (!primed && synth) { primed = true; const u = new SpeechSynthesisUtterance(''); synth.speak(u); } }
 
 // ---------- One turn ----------
-async function ask(text) {
+async function ask(audio) {
   if (!session || Date.now() - session.lastAt > STALE_MS) { if (session) finish(true); newSession(); }
-  addTurn('user', text);
   setState('busy'); $('action').hidden = true; touchIdle();
   let r;
-  try { r = await api('/turn', { mode: 'drive', history: session.history }); }
+  try { r = await api('/turn', { mode: 'drive', history: session.history, audio }); }
   catch (e) {
     if (e.message === 'locked') return;
-    session.history.pop(); save();
     setState('speaking'); $('said').textContent = 'I cannot reach the server right now.';
     await speak('Sorry, I cannot reach the server right now.'); setState('idle'); return;
   }
+  if (!r.heard) { if (++quietCount < 2) return listen(); quietCount = 0; return setState('idle'); }
+  quietCount = 0;
+  $('heard').textContent = r.heard;
+  addTurn('user', r.heard);
   addTurn('assistant', r.say + (r.actions || []).map(describe).join(''));
   $('said').textContent = r.say;
   setState('speaking');
@@ -755,6 +810,7 @@ async function music(a) {
 
 // ---------- Start ----------
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { stopAll(); closeMic(); }
   if (document.visibilityState === 'visible') { dateline(); if (state === 'idle' && session) $('state').innerHTML = 'Tap to <em>carry on</em>'; }
 });
 (async function start() {
