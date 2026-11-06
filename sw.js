@@ -2,7 +2,7 @@
 // The page itself is fetched fresh when online (network first), so a deploy
 // shows up on the next open; the cached copy is only for a dead signal.
 // Bump VERSION when the shell files change.
-const VERSION = 8;
+const VERSION = 10;
 const CACHE = 'drive-shell-v' + VERSION;
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 

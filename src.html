@@ -98,9 +98,13 @@ body{display:flex; flex-direction:column; min-height:100dvh}
     <button class="o-btn" id="testVoice">Play a sample</button>
     <label class="o-label" for="afterAnswer">After an answer</label>
     <select class="o-field" id="afterAnswer">
-      <option value="keep">Keep listening, and ignore talk that isn't for me</option>
+      <option value="name">Keep listening; answer only when I say its name</option>
+      <option value="keep">Keep listening; guess what's meant for me</option>
       <option value="tap">Wait until I tap</option>
     </select>
+    <label class="o-label" for="wakeName">Its name</label>
+    <input class="o-field" id="wakeName" autocomplete="off" spellcheck="false">
+    <p class="o-meta">Say it near the start, e.g. "Jarvis, play some Coldplay". Tested to come through reliably: Jarvis, Ziggy, Bramble, Atlas. Tapping Talk never needs the name.</p>
     <label class="o-label" for="pause">How long a pause means you've finished</label>
     <select class="o-field" id="pause">
       <option value="short">Short (1 second)</option><option value="normal">Normal (1.5 seconds)</option><option value="long">Long (3 seconds, for thinking out loud)</option>
@@ -127,6 +131,13 @@ const store = {
   set: (k, v) => localStorage.setItem('drive.' + k, JSON.stringify(v)),
   del: (k) => localStorage.removeItem('drive.' + k),
 };
+
+// ---------- Hands-free settings ----------
+let ignoredCount = 0, addressedAt = 0;
+const NAME_WINDOW_MS = 5 * 60 * 1000;   // with the name rule, keep listening this long after the last thing said to it
+const afterAnswer = () => store.get('afterAnswer', 'name');
+const wakeName = () => store.get('wakeName', 'Jarvis');
+const inNameWindow = () => afterAnswer() === 'name' && Date.now() - addressedAt < NAME_WINDOW_MS;
 
 // ---------- Key ----------
 (function takeKeyFromLink() {
@@ -274,7 +285,9 @@ $('rate').onchange = (e) => store.set('rate', Number(e.target.value));
 $('volume').value = String(store.get('volume', 0.6));
 $('volume').onchange = (e) => { store.set('volume', Number(e.target.value)); player.volume = Number(e.target.value); };
 $('rate').value = String(store.get('rate', 1));
-$('afterAnswer').value = store.get('afterAnswer', 'keep');
+$('afterAnswer').value = afterAnswer();
+$('wakeName').value = wakeName();
+$('wakeName').onchange = (e) => store.set('wakeName', e.target.value.trim() || 'Jarvis');
 $('afterAnswer').onchange = (e) => store.set('afterAnswer', e.target.value);
 $('pause').value = store.get('pause', 'normal');
 $('pause').onchange = (e) => store.set('pause', e.target.value);
@@ -332,7 +345,7 @@ async function listen(tapped = false) {
   try { await openMic(); if (mic.ctx.state === 'suspended') await mic.ctx.resume(); }
   catch { $('said').textContent = 'Drive mode needs the microphone. Allow it in Chrome\'s site settings.'; setState('idle'); return; }
   recState = { began: performance.now(), floor: 0, spoke: false, lastLoud: 0, chunks: [], rate: mic.ctx.sampleRate, tapped };
-  setState('listening'); $('heard').textContent = '';
+  setState('listening', !tapped && afterAnswer() === 'name' ? 'Say \u201C' + escapeHtml(wakeName()) + '\u201D <em>to talk</em>' : undefined); $('heard').textContent = '';
 }
 function stopListening(send) {
   const r = recState; recState = null;
@@ -340,7 +353,7 @@ function stopListening(send) {
   // The tone only when he tapped: hands-free, it would beep through every
   // conversation with a passenger.
   if (send && r.spoke) { if (r.tapped) heardTone(); return ask(toWav(r.chunks, r.rate), r.tapped); }
-  if (session && ++quietCount < 2) return listen();   // one more chance after a quiet spell
+  if (session && (inNameWindow() || ++quietCount < 2)) return listen();   // one more chance after a quiet spell (longer with the name rule)
   quietCount = 0; setState('idle');
 }
 function stopAll() {
@@ -392,28 +405,29 @@ let primed = false;
 function primeSpeech() { if (!primed && synth) { primed = true; const u = new SpeechSynthesisUtterance(''); synth.speak(u); } }
 
 // ---------- One turn ----------
-let ignoredCount = 0;
 async function ask(audio, tapped = false) {
   if (!session || Date.now() - session.lastAt > STALE_MS) { if (session) finish(true); newSession(); }
   setState('busy'); $('action').hidden = true; touchIdle();
   let r;
   const sent = performance.now();
-  try { r = await api('/turn', { mode: 'drive', history: session.history, audio, voice: voiceChoice(), recent: store.get('recent', []), handsFree: !tapped }); }
+  try { r = await api('/turn', { mode: 'drive', history: session.history, audio, voice: voiceChoice(), recent: store.get('recent', []), handsFree: !tapped, wakeName: afterAnswer() === 'name' ? wakeName() : undefined }); }
   catch (e) {
     if (e.message === 'locked') return;
     setState('speaking'); $('said').textContent = 'I cannot reach the server right now.';
     await speak('Sorry, I cannot reach the server right now.'); setState('idle'); return;
   }
-  if (!r.heard) { if (++quietCount < 2) return listen(); quietCount = 0; return setState('idle'); }
+  if (!r.heard) { if (inNameWindow() || ++quietCount < 2) return listen(); quietCount = 0; return setState('idle'); }
   if (r.ignored) {
     // Not meant for drive mode (a passenger, a call, the radio). Say nothing;
     // after two in a row, stop listening until he taps.
     report({ event: 'ignored', heard: r.heard });
     $('heard').textContent = 'Not for me: ' + r.heard;
-    if (++ignoredCount < 2) return listen();
+    // With the name rule, ignoring costs only the transcription, so it keeps
+    // listening for a while; otherwise it stops after two in a row.
+    if (afterAnswer() === 'name' ? Date.now() - addressedAt < NAME_WINDOW_MS : ++ignoredCount < 2) return listen();
     ignoredCount = 0; return setState('idle', 'Tap when you <em>want me</em>');
   }
-  ignoredCount = 0;
+  ignoredCount = 0; addressedAt = Date.now();
   quietCount = 0;
   $('heard').textContent = r.heard;
   addTurn('user', r.heard);
@@ -425,7 +439,7 @@ async function ask(audio, tapped = false) {
   if (state !== 'speaking') return;           // he interrupted
   for (const a of r.actions || []) await act(a);
   if (r.end) { setState('idle'); return finish(false); }
-  if (store.get('afterAnswer', 'keep') === 'tap') return setState('idle');
+  if (afterAnswer() === 'tap') return setState('idle');
   listen();   // keep the conversation going, even with Maps or Spotify on top
 }
 function outcome(text) {
@@ -440,10 +454,15 @@ function describe(a) {
 }
 
 // ---------- Actions on the phone ----------
+// A backup button for when the phone wouldn't open the other app by itself.
+// It goes once the thing has happened, or after 20 seconds.
+let offerTimer = null;
 function offer(label, run) {
-  $('actionBtn').innerHTML = label; $('actionBtn').onclick = () => { $('action').hidden = true; run(); };
+  $('actionBtn').innerHTML = label; $('actionBtn').onclick = () => { withdraw(); run(); };
   $('action').hidden = false;
+  clearTimeout(offerTimer); offerTimer = setTimeout(withdraw, 20000);
 }
+function withdraw() { clearTimeout(offerTimer); $('action').hidden = true; }
 async function act(a) {
   if (a.type === 'directions') return directions(a.destination);
   if (a.type === 'music') return music(a);
@@ -534,6 +553,7 @@ async function startWhenReady(item, kind) {
       const d = pickDevice(await devicesList());
       if (!d) continue;
       await sp('PUT', '/me/player/play?device_id=' + d.id, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri });
+      withdraw();
       report({ event: 'spotify-playing-after-open', name: item.name, device: d.name, waitedMs: (i + 1) * 1500 });
       outcome('Spotify: it was not running, so it was opened, then "' + item.name + '" started on ' + d.name + '. Confirmed by Spotify.');
       return;
