@@ -96,6 +96,11 @@ body{display:flex; flex-direction:column; min-height:100dvh}
       <option value="0.9">Slower</option><option value="1" selected>Normal</option><option value="1.15">Faster</option>
     </select>
     <button class="o-btn" id="testVoice">Play a sample</button>
+    <label class="o-label" for="afterAnswer">After an answer</label>
+    <select class="o-field" id="afterAnswer">
+      <option value="keep">Keep listening, and ignore talk that isn't for me</option>
+      <option value="tap">Wait until I tap</option>
+    </select>
     <label class="o-label" for="pause">How long a pause means you've finished</label>
     <select class="o-field" id="pause">
       <option value="short">Short (1 second)</option><option value="normal">Normal (1.5 seconds)</option><option value="long">Long (3 seconds, for thinking out loud)</option>
@@ -269,6 +274,8 @@ $('rate').onchange = (e) => store.set('rate', Number(e.target.value));
 $('volume').value = String(store.get('volume', 0.6));
 $('volume').onchange = (e) => { store.set('volume', Number(e.target.value)); player.volume = Number(e.target.value); };
 $('rate').value = String(store.get('rate', 1));
+$('afterAnswer').value = store.get('afterAnswer', 'keep');
+$('afterAnswer').onchange = (e) => store.set('afterAnswer', e.target.value);
 $('pause').value = store.get('pause', 'normal');
 $('pause').onchange = (e) => store.set('pause', e.target.value);
 $('testVoice').onclick = async () => {
@@ -320,17 +327,19 @@ function onFrame(samples) {
   else if (now - r.began > MAX_MS) stopListening(true);
 }
 
-async function listen() {
+async function listen(tapped = false) {
   hush();
   try { await openMic(); if (mic.ctx.state === 'suspended') await mic.ctx.resume(); }
   catch { $('said').textContent = 'Drive mode needs the microphone. Allow it in Chrome\'s site settings.'; setState('idle'); return; }
-  recState = { began: performance.now(), floor: 0, spoke: false, lastLoud: 0, chunks: [], rate: mic.ctx.sampleRate };
+  recState = { began: performance.now(), floor: 0, spoke: false, lastLoud: 0, chunks: [], rate: mic.ctx.sampleRate, tapped };
   setState('listening'); $('heard').textContent = '';
 }
 function stopListening(send) {
   const r = recState; recState = null;
   if (!r || state !== 'listening') return;
-  if (send && r.spoke) { heardTone(); return ask(toWav(r.chunks, r.rate)); }
+  // The tone only when he tapped: hands-free, it would beep through every
+  // conversation with a passenger.
+  if (send && r.spoke) { if (r.tapped) heardTone(); return ask(toWav(r.chunks, r.rate), r.tapped); }
   if (session && ++quietCount < 2) return listen();   // one more chance after a quiet spell
   quietCount = 0; setState('idle');
 }
@@ -376,25 +385,35 @@ function toWav(chunks, rate) {
 $('talk').onclick = () => {
   primeSpeech();
   if (state === 'listening') { recState && (recState.spoke ? stopListening(true) : stopListening(false)); return; }   // send what was heard
-  if (state === 'speaking') { hush(); listen(); return; }
-  if (state === 'idle') listen();
+  if (state === 'speaking') { hush(); listen(true); return; }
+  if (state === 'idle') listen(true);
 };
 let primed = false;
 function primeSpeech() { if (!primed && synth) { primed = true; const u = new SpeechSynthesisUtterance(''); synth.speak(u); } }
 
 // ---------- One turn ----------
-async function ask(audio) {
+let ignoredCount = 0;
+async function ask(audio, tapped = false) {
   if (!session || Date.now() - session.lastAt > STALE_MS) { if (session) finish(true); newSession(); }
   setState('busy'); $('action').hidden = true; touchIdle();
   let r;
   const sent = performance.now();
-  try { r = await api('/turn', { mode: 'drive', history: session.history, audio, voice: voiceChoice() }); }
+  try { r = await api('/turn', { mode: 'drive', history: session.history, audio, voice: voiceChoice(), recent: store.get('recent', []), handsFree: !tapped }); }
   catch (e) {
     if (e.message === 'locked') return;
     setState('speaking'); $('said').textContent = 'I cannot reach the server right now.';
     await speak('Sorry, I cannot reach the server right now.'); setState('idle'); return;
   }
   if (!r.heard) { if (++quietCount < 2) return listen(); quietCount = 0; return setState('idle'); }
+  if (r.ignored) {
+    // Not meant for drive mode (a passenger, a call, the radio). Say nothing;
+    // after two in a row, stop listening until he taps.
+    report({ event: 'ignored', heard: r.heard });
+    $('heard').textContent = 'Not for me: ' + r.heard;
+    if (++ignoredCount < 2) return listen();
+    ignoredCount = 0; return setState('idle', 'Tap when you <em>want me</em>');
+  }
+  ignoredCount = 0;
   quietCount = 0;
   $('heard').textContent = r.heard;
   addTurn('user', r.heard);
@@ -406,8 +425,12 @@ async function ask(audio) {
   if (state !== 'speaking') return;           // he interrupted
   for (const a of r.actions || []) await act(a);
   if (r.end) { setState('idle'); return finish(false); }
-  if (!(r.actions || []).some((a) => a.type === 'directions')) listen();   // keep the conversation going
-  else setState('idle');
+  if (store.get('afterAnswer', 'keep') === 'tap') return setState('idle');
+  listen();   // keep the conversation going, even with Maps or Spotify on top
+}
+function outcome(text) {
+  const t = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  store.set('recent', [...store.get('recent', []), t + ' ' + text].slice(-6));
 }
 function report(evt) { api('/log', { at: new Date().toISOString(), ...evt }).catch(() => {}); }
 function describe(a) {
@@ -430,6 +453,7 @@ function directions(dest) {
   // Chrome may refuse to open another app without a fresh tap, so always
   // leave a big button behind as well as trying straight away.
   offer('<i class="ph-light ph-navigation-arrow"></i> Start directions to ' + escapeHtml(dest), go);
+  outcome('Maps: asked to open directions to ' + dest + ' (the phone cannot confirm Maps opened).');
   go();
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -503,6 +527,21 @@ function spotifyTrouble(e) {
   if (e.status === 429) return 'Spotify says too many requests. Try again in a minute.';
   return 'Spotify did not answer.';
 }
+async function startWhenReady(item, kind) {
+  for (let i = 0; i < 12; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      const d = pickDevice(await devicesList());
+      if (!d) continue;
+      await sp('PUT', '/me/player/play?device_id=' + d.id, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri });
+      report({ event: 'spotify-playing-after-open', name: item.name, device: d.name, waitedMs: (i + 1) * 1500 });
+      outcome('Spotify: it was not running, so it was opened, then "' + item.name + '" started on ' + d.name + '. Confirmed by Spotify.');
+      return;
+    } catch (e) { report({ event: 'spotify-retry-error', status: e.status, message: e.message }); }
+  }
+  report({ event: 'spotify-never-ready', name: item.name });
+  outcome('Spotify: it was not running. It was opened on "' + item.name + '" but never became ready, so it may not be playing.');
+}
 async function music(a) {
   const openApp = (uri) => offer('<i class="ph-light ph-music-notes"></i> Open Spotify', () => { location.href = uri; });
   if (!store.get('spotify')) {
@@ -515,6 +554,7 @@ async function music(a) {
     const device = pickDevice(devices, a.speaker);
     report({ event: 'spotify-devices', devices: devices.map((d) => d.type + ':' + d.name + (d.is_active ? ' (active)' : '')), chosen: device?.name || null, action: a });
     const q = device ? '?device_id=' + device.id : '';
+    if (['pause', 'resume', 'next', 'previous'].includes(a.command)) outcome('Spotify: ' + a.command + ' sent to ' + (device?.name || 'Spotify') + '.');
     if (a.command === 'pause') return void await sp('PUT', '/me/player/pause' + q);
     if (a.command === 'resume') return void await sp('PUT', '/me/player/play' + q);
     if (a.command === 'next') return void await sp('POST', '/me/player/next' + q);
@@ -526,22 +566,34 @@ async function music(a) {
     const items = (found?.[kind + 's']?.items || []).filter(Boolean);
     items.sort((x, y) => (x.owner?.id === 'spotify') - (y.owner?.id === 'spotify'));
     if (!items.length) { await speak('I could not find that on Spotify.'); return; }
-    if (!device) { report({ event: 'spotify-no-device', uri: items[0].uri }); openApp(items[0].uri); location.href = items[0].uri; return; }   // Spotify not running: open it there
+    if (!device) {
+      // Spotify isn't running, so the phone isn't a player yet. Open it on
+      // the right item, then keep asking for a few seconds and start it
+      // properly once the phone appears.
+      report({ event: 'spotify-no-device', uri: items[0].uri });
+      openApp(items[0].uri); location.href = items[0].uri;
+      startWhenReady(items[0], kind);   // not awaited: the conversation carries on meanwhile
+      return;
+    }   // Spotify not running: open it there
     let last;
     for (const item of items.slice(0, 3)) {
-      try { await sp('PUT', '/me/player/play' + q, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri }); report({ event: 'spotify-playing', uri: item.uri, name: item.name }); return; }
+      try { await sp('PUT', '/me/player/play' + q, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri }); report({ event: 'spotify-playing', uri: item.uri, name: item.name }); outcome('Spotify: playing "' + item.name + '" on ' + device.name + '. Confirmed by Spotify.'); return; }
       catch (e) { last = e; if (e.status !== 404 && e.status !== 403) break; }
     }
     throw last;
   } catch (e) {
     report({ event: 'spotify-error', status: e.status, call: e.call, message: e.message });
+    outcome('Spotify: ' + a.command + (a.query ? ' "' + a.query + '"' : '') + ' failed (' + (e.status || '') + ' ' + e.message + ').');
     await speak(spotifyTrouble(e));
   }
 }
 
 // ---------- Start ----------
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { stopAll(); closeMic(); }
+  // Stay in the conversation when Maps or Spotify comes to the front: Chrome
+  // keeps the microphone going in the background (it shows a notification).
+  // Only the screen wake lock is lost; it comes back on return.
+  report({ event: 'visibility', now: document.visibilityState, state });
   if (document.visibilityState === 'visible') { dateline(); if (state === 'idle' && session) $('state').innerHTML = 'Tap to <em>carry on</em>'; }
 });
 (async function start() {
