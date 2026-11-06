@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Otter: warm greige ground, charcoal ink; dark is warm charcoal, never blue-black. -->
+    <color name="ground">#EDEBE7</color>
+    <color name="paper">#F6F5F2</color>
+    <color name="ink">#2B2925</color>
+    <color name="ochre">#A8741C</color>
+    <style name="Drive" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ground</item>
+        <item name="android:statusBarColor">@color/ground</item>
+        <item name="android:navigationBarColor">@color/ground</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:textColor">@color/ink</item>
+        <item name="android:colorAccent">@color/ochre</item>
+    </style>
+</resources>
