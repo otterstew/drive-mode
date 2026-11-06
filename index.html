@@ -462,6 +462,11 @@ body{display:flex; flex-direction:column; min-height:100dvh}
     <label class="o-label" for="wakeName">Its name</label>
     <input class="o-field" id="wakeName" autocomplete="off" spellcheck="false">
     <p class="o-meta">Say it near the start, e.g. "Jarvis, play some Coldplay". Tested to come through reliably: Jarvis, Ziggy, Bramble, Atlas. Tapping Talk never needs the name.</p>
+    <label class="o-label" for="micMode">Microphone</label>
+    <select class="o-field" id="micMode">
+      <option value="normal">Normal (clearest)</option>
+      <option value="plain">Plain (try this if the car thinks it's a phone call)</option>
+    </select>
     <label class="o-label" for="pause">How long a pause means you've finished</label>
     <select class="o-field" id="pause">
       <option value="short">Short (1 second)</option><option value="normal">Normal (1.5 seconds)</option><option value="long">Long (3 seconds, for thinking out loud)</option>
@@ -576,9 +581,10 @@ function touchIdle() { clearTimeout(idleTimer); idleTimer = setTimeout(() => fin
 
 // ---------- State display ----------
 let state = 'idle';
-const LABEL = { idle: 'Talk', listening: 'Listening… tap to stop', busy: 'Thinking…', speaking: 'Tap to interrupt' };
+const LABEL = { idle: 'Talk', listening: 'Listening… tap to send', busy: 'Thinking…', speaking: 'Tap to stop' };
 function setState(s, heading) {
   state = s;
+  if (s === 'idle') closeMic();
   const talk = $('talk');
   talk.classList.toggle('is-listening', s === 'listening');
   talk.classList.toggle('is-busy', s === 'busy');
@@ -646,6 +652,8 @@ $('afterAnswer').value = afterAnswer();
 $('wakeName').value = wakeName();
 $('wakeName').onchange = (e) => store.set('wakeName', e.target.value.trim() || 'Jarvis');
 $('afterAnswer').onchange = (e) => store.set('afterAnswer', e.target.value);
+$('micMode').value = store.get('micMode', 'normal');
+$('micMode').onchange = (e) => { store.set('micMode', e.target.value); closeMic(); };
 $('pause').value = store.get('pause', 'normal');
 $('pause').onchange = (e) => store.set('pause', e.target.value);
 $('testVoice').onclick = async () => {
@@ -668,7 +676,11 @@ let mic = null, recState = null, quietCount = 0;
 
 async function openMic() {
   if (mic) return mic;
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  // "plain" asks for the microphone without Chrome's call processing, in
+  // case that is what makes the car's Bluetooth treat it as a phone call.
+  const plain = store.get('micMode', 'normal') === 'plain';
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: !plain, noiseSuppression: !plain, autoGainControl: !plain, channelCount: 1 } });
+  report({ event: 'mic-open', plain, label: stream.getAudioTracks()[0]?.label || '' });
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const source = ctx.createMediaStreamSource(stream);
   const node = ctx.createScriptProcessor(4096, 1, 1);
@@ -755,7 +767,7 @@ function toWav(chunks, rate) {
 $('talk').onclick = () => {
   primeSpeech();
   if (state === 'listening') { recState && (recState.spoke ? stopListening(true) : stopListening(false)); return; }   // send what was heard
-  if (state === 'speaking') { hush(); listen(true); return; }
+  if (state === 'speaking') { hush(); setState('idle', 'Stopped. Tap to <em>talk</em>'); return; }
   if (state === 'idle') listen(true);
 };
 let primed = false;
