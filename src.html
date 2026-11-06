@@ -66,7 +66,8 @@ body{display:flex; flex-direction:column; min-height:100dvh}
   <div class="d-spacer"></div>
   <button class="o-btn o-btn--primary o-btn--block d-talk" id="talk"><i class="ph-light ph-microphone"></i><span id="talkLabel">Talk</span></button>
   <div class="d-row">
-    <button class="o-btn" id="finishBtn">End and save notes</button>
+    <button class="o-btn" id="stopBtn"><i class="ph-light ph-stop"></i> Stop</button>
+    <button class="o-btn" id="finishBtn">End conversation</button>
   </div>
 </main>
 
@@ -86,6 +87,10 @@ body{display:flex; flex-direction:column; min-height:100dvh}
     <h2>Voice</h2>
     <label class="o-label" for="voice">Voice</label>
     <select class="o-field" id="voice"></select>
+    <label class="o-label" for="volume">Volume</label>
+    <select class="o-field" id="volume">
+      <option value="0.35">Quiet</option><option value="0.6">Medium</option><option value="1">Full</option>
+    </select>
     <label class="o-label" for="rate">Speed</label>
     <select class="o-field" id="rate">
       <option value="0.9">Slower</option><option value="1" selected>Normal</option><option value="1.15">Faster</option>
@@ -185,6 +190,7 @@ async function retryPending() {
     catch { store.set('pending', [...store.get('pending', []), s]); }
   }
 }
+$('stopBtn').onclick = () => stopAll();
 $('finishBtn').onclick = () => { stopAll(); finish(false); };
 
 let idleTimer = null;
@@ -220,6 +226,7 @@ function speak(text) {
     const u = new SpeechSynthesisUtterance(text);
     const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-GB';
     u.rate = Number(store.get('rate', 1));
+    u.volume = Number(store.get('volume', 0.6));
     u.onend = u.onerror = () => resolve();
     synth.speak(u);
   });
@@ -232,6 +239,9 @@ function fillVoices() {
 if (synth) synth.onvoiceschanged = fillVoices;
 $('voice').onchange = (e) => store.set('voice', e.target.value);
 $('rate').onchange = (e) => store.set('rate', Number(e.target.value));
+$('volume').value = String(store.get('volume', 0.6));
+$('volume').onchange = (e) => store.set('volume', Number(e.target.value));
+$('rate').value = String(store.get('rate', 1));
 $('pause').value = store.get('pause', 'normal');
 $('pause').onchange = (e) => store.set('pause', e.target.value);
 $('testVoice').onclick = () => speak('This is how I will sound in the car.');
@@ -380,7 +390,7 @@ const SP_SCOPES = 'user-modify-playback-state user-read-playback-state';
 const redirectUri = () => location.origin + location.pathname;
 function renderSpotify() {
   $('spotifyId').value = store.get('spotifyId', '');
-  $('spotifyState').textContent = store.get('spotify') ? 'Connected' : 'Not connected';
+  $('spotifyState').textContent = (store.get('spotify') ? 'Connected' : 'Not connected') + (store.get('spotifyLastError') ? ' · last problem: ' + store.get('spotifyLastError') : '');
   $('spotifyConnect').textContent = store.get('spotify') ? 'Connect again' : 'Connect Spotify';
 }
 function b64url(bytes) { return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
@@ -399,7 +409,7 @@ async function spotifyToken(params) {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: store.get('spotifyId'), ...params }),
   });
-  if (!res.ok) throw new Error('Spotify sign-in failed');
+  if (!res.ok) { let m = ''; try { m = (await res.json()).error_description || ''; } catch {} throw new Error('Spotify sign-in failed' + (m ? ': ' + m : '')); }
   const t = await res.json(), old = store.get('spotify') || {};
   store.set('spotify', { access: t.access_token, refresh: t.refresh_token || old.refresh, until: Date.now() + (t.expires_in - 60) * 1000 });
 }
@@ -407,25 +417,42 @@ async function spotifyReturn() {
   const q = new URLSearchParams(location.search), code = q.get('code');
   if (!code) return false;
   history.replaceState(null, '', location.pathname);
-  try { await spotifyToken({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: store.get('spVerifier') }); } catch {}
+  try { await spotifyToken({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: store.get('spVerifier') }); store.del('spotifyLastError'); }
+  catch (e) { store.set('spotifyLastError', new Date().toLocaleString('en-GB') + ' · connecting failed: ' + e.message); }
   store.del('spVerifier');
   return true;
 }
 async function sp(method, path, body) {
-  let t = store.get('spotify'); if (!t) throw new Error('not connected');
+  let t = store.get('spotify'); if (!t) throw spErr(0, 'not connected');
   if (Date.now() > t.until) { await spotifyToken({ grant_type: 'refresh_token', refresh_token: t.refresh }); t = store.get('spotify'); }
   const res = await fetch('https://api.spotify.com/v1' + path, {
     method, headers: { Authorization: 'Bearer ' + t.access, ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 204) return null;
-  if (!res.ok) throw new Error('Spotify ' + res.status);
+  if (res.status === 204 || res.status === 202) return null;
+  if (!res.ok) {
+    let msg = ''; try { const j = await res.json(); msg = j?.error?.message || j?.error_description || ''; } catch {}
+    throw spErr(res.status, msg, method + ' ' + path.split('?')[0]);
+  }
   return res.headers.get('content-type')?.includes('json') ? res.json() : null;
 }
-async function pickDevice(speaker) {
-  const { devices = [] } = (await sp('GET', '/me/player/devices')) || {};
+function spErr(status, message, call = '') { const e = new Error(message || 'Spotify ' + status); e.status = status; e.call = call; return e; }
+async function devicesList() { return ((await sp('GET', '/me/player/devices')) || {}).devices || []; }
+function pickDevice(devices, speaker) {
   if (speaker) { const want = speaker.toLowerCase(); const d = devices.find((d) => d.name.toLowerCase().includes(want)); if (d) return d; }
   return devices.find((d) => d.is_active) || devices.find((d) => d.type === 'Smartphone') || devices[0] || null;
+}
+// What went wrong, in words he can hear, and the detail on screen and in
+// Settings so it can be passed on.
+function spotifyTrouble(e) {
+  const detail = 'Spotify ' + (e.status || '') + (e.call ? ' on ' + e.call : '') + (e.message ? ': ' + e.message : '');
+  store.set('spotifyLastError', new Date().toLocaleString('en-GB') + ' · ' + detail);
+  $('heard').textContent = detail;
+  if (e.status === 401 || /sign-in/.test(e.message)) return 'Spotify needs connecting again. You can do that in settings when you have stopped.';
+  if (e.status === 403) return 'Spotify refused. That is usually the developer app settings or the account allowed list.';
+  if (e.status === 404) return 'Spotify has no player ready. Open Spotify on the phone once, then ask again.';
+  if (e.status === 429) return 'Spotify says too many requests. Try again in a minute.';
+  return 'Spotify did not answer.';
 }
 async function music(a) {
   const openApp = (uri) => offer('<i class="ph-light ph-music-notes"></i> Open Spotify', () => { location.href = uri; });
@@ -434,20 +461,29 @@ async function music(a) {
     return;
   }
   try {
-    const device = await pickDevice(a.speaker);
+    const devices = await devicesList();
+    const device = pickDevice(devices, a.speaker);
     const q = device ? '?device_id=' + device.id : '';
     if (a.command === 'pause') return void await sp('PUT', '/me/player/pause' + q);
     if (a.command === 'resume') return void await sp('PUT', '/me/player/play' + q);
     if (a.command === 'next') return void await sp('POST', '/me/player/next' + q);
     if (a.command === 'previous') return void await sp('POST', '/me/player/previous' + q);
     const kind = ['track', 'album', 'artist', 'playlist'].includes(a.kind) ? a.kind : 'track';
-    const found = await sp('GET', '/search?' + new URLSearchParams({ q: a.query || '', type: kind, limit: '1' }));
-    const item = found?.[kind + 's']?.items?.find(Boolean);
-    if (!item) { await speak('I could not find that on Spotify.'); return; }
-    if (!device) { openApp(item.uri); location.href = item.uri; return; }   // Spotify not running: open it there
-    await sp('PUT', '/me/player/play' + q, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri });
+    const found = await sp('GET', '/search?' + new URLSearchParams({ q: a.query || '', type: kind, limit: '5' }));
+    // Spotify's search can return empty slots, and its own editorial
+    // playlists can't be started by apps like this one, so prefer others.
+    const items = (found?.[kind + 's']?.items || []).filter(Boolean);
+    items.sort((x, y) => (x.owner?.id === 'spotify') - (y.owner?.id === 'spotify'));
+    if (!items.length) { await speak('I could not find that on Spotify.'); return; }
+    if (!device) { openApp(items[0].uri); location.href = items[0].uri; return; }   // Spotify not running: open it there
+    let last;
+    for (const item of items.slice(0, 3)) {
+      try { await sp('PUT', '/me/player/play' + q, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri }); return; }
+      catch (e) { last = e; if (e.status !== 404 && e.status !== 403) break; }
+    }
+    throw last;
   } catch (e) {
-    await speak('Spotify did not answer.');
+    await speak(spotifyTrouble(e));
   }
 }
 
