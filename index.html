@@ -743,6 +743,19 @@ function heardTone() {
   } catch {}
 }
 
+// "Done": the same two notes, rising higher, for a command carried out.
+function doneTone() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)(), now = ctx.currentTime, g = ctx.createGain();
+    g.connect(ctx.destination);
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.12 * Number(store.get('volume', 0.6)), now + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+    [784, 1175].forEach((f, i) => { const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f; o.connect(g); o.start(now + i * 0.12); o.stop(now + 0.12 + i * 0.12 + 0.15); });
+    setTimeout(() => ctx.close(), 800);
+  } catch {}
+}
+
 // Float samples at the phone's rate -> 16 kHz 16-bit mono WAV, base64.
 function toWav(chunks, rate) {
   const total = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(total);
@@ -800,13 +813,19 @@ async function ask(audio, tapped = false) {
   quietCount = 0;
   $('heard').textContent = r.heard;
   addTurn('user', r.heard);
-  addTurn('assistant', r.say);
+  if (r.say) addTurn('assistant', r.say);
   report({ event: 'turn', heard: r.heard, said: r.say, actions: r.actions || [], server: r.timing, roundTripMs: Math.round(performance.now() - sent), kb: Math.round(audio.length / 1024) });
-  $('said').textContent = r.say;
-  setState('speaking');
-  await speak(r.say, r.audio);
-  if (state !== 'speaking') return;           // he interrupted
-  for (const a of r.actions || []) await act(a);
+  if (r.quiet) {
+    // A plain command: no words, just a chime, then do it.
+    doneTone();
+    for (const a of r.actions || []) await act(a);
+  } else {
+    $('said').textContent = r.say;
+    setState('speaking');
+    await speak(r.say, r.audio);
+    if (state !== 'speaking') return;           // he interrupted
+    for (const a of r.actions || []) await act(a);
+  }
   if (r.end) { setState('idle'); return finish(false); }
   if (afterAnswer() === 'tap') return setState('idle');
   listen();   // keep the conversation going, even with Maps or Spotify on top
