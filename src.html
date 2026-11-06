@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en-GB" data-hue="ochre">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Drive</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#EDEBE7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24221F" media="(prefers-color-scheme: dark)">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/light/style.css">
+<style>
+/*OTTER*/
+
+/* ── Drive mode ── */
+html,body{height:100%}
+body{display:flex; flex-direction:column; min-height:100dvh}
+[hidden]{display:none !important}
+.d-main{flex:1; display:flex; flex-direction:column; padding:var(--s5) var(--s4) var(--s4); max-width:720px; width:100%; margin:0 auto}
+.d-state{margin:var(--s2) 0 var(--s5)}
+.d-heard{font-size:var(--t-md); color:var(--ink-3); min-height:1.5em; margin-bottom:var(--s3)}
+.d-said{font-size:var(--t-xl); line-height:1.35; color:var(--ink); max-width:34ch}
+.d-spacer{flex:1}
+.d-action{margin-top:var(--s5)}
+.d-action .o-btn{min-height:96px; font-size:var(--t-xl)}
+.d-talk{min-height:38dvh; flex-direction:column; gap:var(--s3); font-size:var(--t-xl); border-radius:var(--r-lg)}
+.d-talk i{font-size:var(--t-4xl)}
+.d-talk.is-listening{background:var(--accent-deep)}
+.d-talk.is-busy{background:color-mix(in oklab,var(--ink),var(--ground) 30%)}
+.d-row{display:flex; gap:var(--s3); margin-top:var(--s3)}
+.d-row .o-btn{flex:1}
+.d-settings .o-panel{margin-top:var(--s4)}
+.d-settings .o-field{margin:var(--s2) 0 var(--s3)}
+.d-settings p{margin-bottom:var(--s3)}
+</style>
+</head>
+<body>
+
+<!-- Locked: the key arrives once in a link (#key=...) or is pasted here -->
+<section class="o-gate" id="gate" hidden>
+  <div class="o-gate__inner">
+    <h1 class="o-display"><em>Drive</em></h1>
+    <p class="o-lede">Paste your drive key to start. You only do this once on each phone.</p>
+    <input class="o-field" id="gateKey" type="password" autocomplete="off" placeholder="Drive key" aria-label="Drive key">
+    <button class="o-btn o-btn--primary o-btn--block" id="gateGo">Unlock drive mode</button>
+    <p class="o-meta" id="gateMsg"></p>
+  </div>
+</section>
+
+<header class="o-bar" id="bar" hidden>
+  <a class="o-wordmark" href="./">Drive</a>
+  <span class="o-bar__spacer"></span>
+  <button class="o-bar__link o-btn o-btn--quiet" id="openSettings" aria-label="Settings"><i class="ph-light ph-gear-six"></i></button>
+</header>
+
+<main class="d-main" id="app" hidden>
+  <p class="o-dateline" id="dateline"></p>
+  <h1 class="o-display d-state" id="state">Tap to <em>talk</em></h1>
+  <p class="d-heard" id="heard"></p>
+  <p class="d-said" id="said"></p>
+  <div class="d-action" id="action" hidden><button class="o-btn o-btn--block" id="actionBtn"></button></div>
+  <div class="d-spacer"></div>
+  <button class="o-btn o-btn--primary o-btn--block d-talk" id="talk"><i class="ph-light ph-microphone"></i><span id="talkLabel">Talk</span></button>
+  <div class="d-row">
+    <button class="o-btn" id="finishBtn">End and save notes</button>
+  </div>
+</main>
+
+<main class="d-main d-settings" id="settings" hidden>
+  <h1 class="o-display">Settings</h1>
+
+  <section class="o-panel">
+    <h2>Spotify</h2>
+    <p class="o-meta" id="spotifyState">Not connected</p>
+    <p>Connect once so drive mode can start music for you. Needs Spotify Premium.</p>
+    <label class="o-label" for="spotifyId">Spotify app client ID</label>
+    <input class="o-field" id="spotifyId" autocomplete="off" spellcheck="false">
+    <button class="o-btn" id="spotifyConnect">Connect Spotify</button>
+  </section>
+
+  <section class="o-panel">
+    <h2>Voice</h2>
+    <label class="o-label" for="voice">Voice</label>
+    <select class="o-field" id="voice"></select>
+    <label class="o-label" for="rate">Speed</label>
+    <select class="o-field" id="rate">
+      <option value="0.9">Slower</option><option value="1" selected>Normal</option><option value="1.15">Faster</option>
+    </select>
+    <button class="o-btn" id="testVoice">Play a sample</button>
+  </section>
+
+  <section class="o-panel">
+    <h2>This phone</h2>
+    <p>Forgetting the key locks drive mode on this phone until you open your link again.</p>
+    <button class="o-btn o-btn--danger" id="forget">Forget key</button>
+  </section>
+
+  <div class="o-actionbar"><button class="o-btn o-btn--primary" id="closeSettings">Back to drive</button></div>
+</main>
+
+<script>
+'use strict';
+const API = 'https://uftlxeahciewiitclkbu.functions.supabase.co/drive-mode';
+const IDLE_FINISH_MS = 10 * 60 * 1000;   // write up after 10 quiet minutes
+const STALE_MS = 30 * 60 * 1000;         // a session older than this is over
+const $ = (id) => document.getElementById(id);
+const store = {
+  get: (k, d = null) => { try { return JSON.parse(localStorage.getItem('drive.' + k)) ?? d; } catch { return d; } },
+  set: (k, v) => localStorage.setItem('drive.' + k, JSON.stringify(v)),
+  del: (k) => localStorage.removeItem('drive.' + k),
+};
+
+// ---------- Key ----------
+(function takeKeyFromLink() {
+  const m = location.hash.match(/key=([^&]+)/);
+  if (m) { store.set('key', decodeURIComponent(m[1])); history.replaceState(null, '', location.pathname + location.search); }
+})();
+
+async function api(path, body) {
+  const res = await fetch(API + path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'x-drive-key': store.get('key') || '', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401) { lock('That key did not work.'); throw new Error('locked'); }
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+function lock(msg) {
+  store.del('key');
+  for (const id of ['bar', 'app', 'settings']) $(id).hidden = true;
+  $('gate').hidden = false; $('gateMsg').textContent = msg || '';
+}
+function unlock() { $('gate').hidden = true; $('bar').hidden = false; show('app'); }
+$('gateGo').onclick = async () => {
+  store.set('key', $('gateKey').value.trim());
+  try { await api('/ping'); unlock(); } catch {}
+};
+
+// ---------- Screens ----------
+function show(which) { $('app').hidden = which !== 'app'; $('settings').hidden = which !== 'settings'; }
+$('openSettings').onclick = () => { stopAll(); show('settings'); renderSpotify(); };
+$('closeSettings').onclick = () => show('app');
+$('forget').onclick = () => { store.del('key'); lock('Key forgotten on this phone.'); };
+
+function dateline() {
+  const d = new Date();
+  $('dateline').textContent = d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }) + ' · Drive mode';
+}
+
+// ---------- Session (kept in this phone so a trip to Maps doesn't lose it) ----------
+let session = store.get('session');
+function newSession() { session = { startedAt: new Date().toISOString(), lastAt: Date.now(), history: [] }; save(); }
+function save() { if (session) { session.lastAt = Date.now(); store.set('session', session); } }
+function addTurn(role, text) { if (!session) newSession(); session.history.push({ role, text }); save(); }
+
+let finishing = false;
+async function finish(quiet) {
+  if (finishing || !session || !session.history.length) { session = null; store.del('session'); return; }
+  finishing = true;
+  const s = session; session = null; store.del('session');
+  if (!quiet) setState('busy', 'Saving your <em>notes</em>');
+  try {
+    const r = await api('/finish', { mode: 'drive', history: s.history, startedAt: s.startedAt });
+    if (!quiet) { setState('idle'); $('said').textContent = r.title ? 'Notes saved: ' + r.title : 'Nothing to save from that one.'; $('heard').textContent = ''; }
+  } catch (e) {
+    store.set('pending', [...store.get('pending', []), s]);   // try again later rather than lose it
+    if (!quiet) { setState('idle'); $('said').textContent = 'Could not save the notes yet. I will try again next time.'; }
+  } finally { finishing = false; }
+}
+async function retryPending() {
+  const waiting = store.get('pending', []); if (!waiting.length) return;
+  store.del('pending');
+  for (const s of waiting) {
+    try { await api('/finish', { mode: 'drive', history: s.history, startedAt: s.startedAt }); }
+    catch { store.set('pending', [...store.get('pending', []), s]); }
+  }
+}
+$('finishBtn').onclick = () => { stopAll(); finish(false); };
+
+let idleTimer = null;
+function touchIdle() { clearTimeout(idleTimer); idleTimer = setTimeout(() => finish(true), IDLE_FINISH_MS); }
+
+// ---------- State display ----------
+let state = 'idle';
+const LABEL = { idle: 'Talk', listening: 'Listening… tap to stop', busy: 'Thinking…', speaking: 'Tap to interrupt' };
+function setState(s, heading) {
+  state = s;
+  const talk = $('talk');
+  talk.classList.toggle('is-listening', s === 'listening');
+  talk.classList.toggle('is-busy', s === 'busy');
+  $('talkLabel').textContent = LABEL[s];
+  $('state').innerHTML = heading || { idle: 'Tap to <em>talk</em>', listening: '<em>Listening</em>', busy: '<em>Thinking</em>', speaking: '<em>Speaking</em>' }[s];
+  if (s === 'listening' || s === 'speaking') wakeLock();
+}
+
+let lock_ = null;
+async function wakeLock() { try { if (!lock_ && 'wakeLock' in navigator) { lock_ = await navigator.wakeLock.request('screen'); lock_.onrelease = () => lock_ = null; } } catch {} }
+
+// ---------- Speaking ----------
+const synth = window.speechSynthesis;
+function voices() { return synth ? synth.getVoices().filter((v) => v.lang && v.lang.startsWith('en')) : []; }
+function pickVoice() {
+  const all = voices(), want = store.get('voice');
+  return all.find((v) => v.name === want) || all.find((v) => v.lang === 'en-GB') || all[0] || null;
+}
+function speak(text) {
+  return new Promise((resolve) => {
+    if (!synth || !text) return resolve();
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-GB';
+    u.rate = Number(store.get('rate', 1));
+    u.onend = u.onerror = () => resolve();
+    synth.speak(u);
+  });
+}
+function fillVoices() {
+  const sel = $('voice'), want = store.get('voice'), current = pickVoice();
+  sel.innerHTML = '';
+  for (const v of voices()) { const o = new Option(v.name + ' (' + v.lang + ')', v.name); if (v.name === (want || current?.name)) o.selected = true; sel.add(o); }
+}
+if (synth) synth.onvoiceschanged = fillVoices;
+$('voice').onchange = (e) => store.set('voice', e.target.value);
+$('rate').onchange = (e) => store.set('rate', Number(e.target.value));
+$('testVoice').onclick = () => speak('This is how I will sound in the car.');
+
+// ---------- Listening ----------
+const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, quietCount = 0;
+function listen() {
+  if (!Rec) { $('said').textContent = 'This browser cannot listen. Open drive mode in Chrome.'; return; }
+  synth && synth.cancel();
+  rec = new Rec();
+  rec.lang = 'en-GB'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+  let final = '';
+  rec.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) final += e.results[i][0].transcript; else interim += e.results[i][0].transcript;
+    }
+    $('heard').textContent = (final + interim).trim();
+  };
+  rec.onerror = (e) => { if (e.error === 'not-allowed') $('said').textContent = 'Drive mode needs the microphone. Allow it in Chrome\'s site settings.'; };
+  rec.onend = () => {
+    rec = null;
+    if (state !== 'listening') return;
+    const text = final.trim();
+    if (text) { quietCount = 0; ask(text); }
+    else if (session && ++quietCount < 2) listen();   // one more chance after a pause
+    else { quietCount = 0; setState('idle'); }
+  };
+  setState('listening'); $('heard').textContent = '';
+  rec.start();
+}
+function stopAll() {
+  if (rec) { const r = rec; rec = null; try { r.abort(); } catch {} }
+  synth && synth.cancel();
+  if (state !== 'busy') setState('idle');
+}
+
+$('talk').onclick = () => {
+  primeSpeech();
+  if (state === 'listening') { rec && rec.stop(); return; }   // stop and send what was heard
+  if (state === 'speaking') { synth.cancel(); listen(); return; }
+  if (state === 'idle') listen();
+};
+let primed = false;
+function primeSpeech() { if (!primed && synth) { primed = true; const u = new SpeechSynthesisUtterance(''); synth.speak(u); } }
+
+// ---------- One turn ----------
+async function ask(text) {
+  if (!session || Date.now() - session.lastAt > STALE_MS) { if (session) finish(true); newSession(); }
+  addTurn('user', text);
+  setState('busy'); $('action').hidden = true; touchIdle();
+  let r;
+  try { r = await api('/turn', { mode: 'drive', history: session.history }); }
+  catch (e) {
+    if (e.message === 'locked') return;
+    session.history.pop(); save();
+    setState('speaking'); $('said').textContent = 'I cannot reach the server right now.';
+    await speak('Sorry, I cannot reach the server right now.'); setState('idle'); return;
+  }
+  addTurn('assistant', r.say + (r.actions || []).map(describe).join(''));
+  $('said').textContent = r.say;
+  setState('speaking');
+  await speak(r.say);
+  if (state !== 'speaking') return;           // he interrupted
+  for (const a of r.actions || []) await act(a);
+  if (r.end) { setState('idle'); return finish(false); }
+  if (!(r.actions || []).some((a) => a.type === 'directions')) listen();   // keep the conversation going
+  else setState('idle');
+}
+function describe(a) {
+  if (a.type === 'directions') return ' [Started directions to ' + a.destination + ']';
+  if (a.type === 'music') return ' [Music: ' + a.command + (a.query ? ' ' + a.query : '') + ']';
+  return '';
+}
+
+// ---------- Actions on the phone ----------
+function offer(label, run) {
+  $('actionBtn').innerHTML = label; $('actionBtn').onclick = () => { $('action').hidden = true; run(); };
+  $('action').hidden = false;
+}
+async function act(a) {
+  if (a.type === 'directions') return directions(a.destination);
+  if (a.type === 'music') return music(a);
+}
+function directions(dest) {
+  const go = () => { location.href = 'google.navigation:q=' + encodeURIComponent(dest) + '&mode=d'; };
+  // Chrome may refuse to open another app without a fresh tap, so always
+  // leave a big button behind as well as trying straight away.
+  offer('<i class="ph-light ph-navigation-arrow"></i> Start directions to ' + escapeHtml(dest), go);
+  go();
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---------- Spotify (Web API, PKCE: no secret needed in the page) ----------
+const SP_SCOPES = 'user-modify-playback-state user-read-playback-state';
+const redirectUri = () => location.origin + location.pathname;
+function renderSpotify() {
+  $('spotifyId').value = store.get('spotifyId', '');
+  $('spotifyState').textContent = store.get('spotify') ? 'Connected' : 'Not connected';
+  $('spotifyConnect').textContent = store.get('spotify') ? 'Connect again' : 'Connect Spotify';
+}
+function b64url(bytes) { return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+$('spotifyConnect').onclick = async () => {
+  const id = $('spotifyId').value.trim(); if (!id) return;
+  store.set('spotifyId', id);
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  store.set('spVerifier', verifier);
+  const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+  location.href = 'https://accounts.spotify.com/authorize?' + new URLSearchParams({
+    client_id: id, response_type: 'code', redirect_uri: redirectUri(), scope: SP_SCOPES, code_challenge_method: 'S256', code_challenge: challenge,
+  });
+};
+async function spotifyToken(params) {
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: store.get('spotifyId'), ...params }),
+  });
+  if (!res.ok) throw new Error('Spotify sign-in failed');
+  const t = await res.json(), old = store.get('spotify') || {};
+  store.set('spotify', { access: t.access_token, refresh: t.refresh_token || old.refresh, until: Date.now() + (t.expires_in - 60) * 1000 });
+}
+async function spotifyReturn() {
+  const q = new URLSearchParams(location.search), code = q.get('code');
+  if (!code) return false;
+  history.replaceState(null, '', location.pathname);
+  try { await spotifyToken({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: store.get('spVerifier') }); } catch {}
+  store.del('spVerifier');
+  return true;
+}
+async function sp(method, path, body) {
+  let t = store.get('spotify'); if (!t) throw new Error('not connected');
+  if (Date.now() > t.until) { await spotifyToken({ grant_type: 'refresh_token', refresh_token: t.refresh }); t = store.get('spotify'); }
+  const res = await fetch('https://api.spotify.com/v1' + path, {
+    method, headers: { Authorization: 'Bearer ' + t.access, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 204) return null;
+  if (!res.ok) throw new Error('Spotify ' + res.status);
+  return res.headers.get('content-type')?.includes('json') ? res.json() : null;
+}
+async function pickDevice(speaker) {
+  const { devices = [] } = (await sp('GET', '/me/player/devices')) || {};
+  if (speaker) { const want = speaker.toLowerCase(); const d = devices.find((d) => d.name.toLowerCase().includes(want)); if (d) return d; }
+  return devices.find((d) => d.is_active) || devices.find((d) => d.type === 'Smartphone') || devices[0] || null;
+}
+async function music(a) {
+  const openApp = (uri) => offer('<i class="ph-light ph-music-notes"></i> Open Spotify', () => { location.href = uri; });
+  if (!store.get('spotify')) {
+    if (a.command === 'play' && a.query) { openApp('spotify:search:' + encodeURIComponent(a.query)); location.href = 'spotify:search:' + encodeURIComponent(a.query); }
+    return;
+  }
+  try {
+    const device = await pickDevice(a.speaker);
+    const q = device ? '?device_id=' + device.id : '';
+    if (a.command === 'pause') return void await sp('PUT', '/me/player/pause' + q);
+    if (a.command === 'resume') return void await sp('PUT', '/me/player/play' + q);
+    if (a.command === 'next') return void await sp('POST', '/me/player/next' + q);
+    if (a.command === 'previous') return void await sp('POST', '/me/player/previous' + q);
+    const kind = ['track', 'album', 'artist', 'playlist'].includes(a.kind) ? a.kind : 'track';
+    const found = await sp('GET', '/search?' + new URLSearchParams({ q: a.query || '', type: kind, limit: '1' }));
+    const item = found?.[kind + 's']?.items?.find(Boolean);
+    if (!item) { await speak('I could not find that on Spotify.'); return; }
+    if (!device) { openApp(item.uri); location.href = item.uri; return; }   // Spotify not running: open it there
+    await sp('PUT', '/me/player/play' + q, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri });
+  } catch (e) {
+    await speak('Spotify did not answer.');
+  }
+}
+
+// ---------- Start ----------
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { dateline(); if (state === 'idle' && session) $('state').innerHTML = 'Tap to <em>carry on</em>'; }
+});
+(async function start() {
+  dateline(); fillVoices();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (!store.get('key')) return lock();
+  unlock();
+  if (await spotifyReturn()) { show('settings'); renderSpotify(); }
+  if (session && Date.now() - session.lastAt > STALE_MS) finish(true);    // last trip's notes
+  else if (session) { $('state').innerHTML = 'Tap to <em>carry on</em>'; touchIdle(); }
+
+  retryPending();
+})();
+</script>
+</body>
+</html>
