@@ -742,7 +742,8 @@ async function ask(audio) {
   quietCount = 0;
   $('heard').textContent = r.heard;
   addTurn('user', r.heard);
-  addTurn('assistant', r.say + (r.actions || []).map(describe).join(''));
+  addTurn('assistant', r.say);
+  report({ event: 'turn', heard: r.heard, said: r.say, actions: r.actions || [] });
   $('said').textContent = r.say;
   setState('speaking');
   await speak(r.say, r.audio);
@@ -752,6 +753,7 @@ async function ask(audio) {
   if (!(r.actions || []).some((a) => a.type === 'directions')) listen();   // keep the conversation going
   else setState('idle');
 }
+function report(evt) { api('/log', { at: new Date().toISOString(), ...evt }).catch(() => {}); }
 function describe(a) {
   if (a.type === 'directions') return ' [Started directions to ' + a.destination + ']';
   if (a.type === 'music') return ' [Music: ' + a.command + (a.query ? ' ' + a.query : '') + ']';
@@ -848,32 +850,35 @@ function spotifyTrouble(e) {
 async function music(a) {
   const openApp = (uri) => offer('<i class="ph-light ph-music-notes"></i> Open Spotify', () => { location.href = uri; });
   if (!store.get('spotify')) {
+    report({ event: 'spotify-not-connected', action: a });
     if (a.command === 'play' && a.query) { openApp('spotify:search:' + encodeURIComponent(a.query)); location.href = 'spotify:search:' + encodeURIComponent(a.query); }
     return;
   }
   try {
     const devices = await devicesList();
     const device = pickDevice(devices, a.speaker);
+    report({ event: 'spotify-devices', devices: devices.map((d) => d.type + ':' + d.name + (d.is_active ? ' (active)' : '')), chosen: device?.name || null, action: a });
     const q = device ? '?device_id=' + device.id : '';
     if (a.command === 'pause') return void await sp('PUT', '/me/player/pause' + q);
     if (a.command === 'resume') return void await sp('PUT', '/me/player/play' + q);
     if (a.command === 'next') return void await sp('POST', '/me/player/next' + q);
     if (a.command === 'previous') return void await sp('POST', '/me/player/previous' + q);
     const kind = ['track', 'album', 'artist', 'playlist'].includes(a.kind) ? a.kind : 'track';
-    const found = await sp('GET', '/search?' + new URLSearchParams({ q: a.query || '', type: kind, limit: '5' }));
+    const found = await sp('GET', '/search?' + new URLSearchParams({ q: (a.query || '').replace(/\s+by\s+/i, ' '), type: kind, limit: '5' }));
     // Spotify's search can return empty slots, and its own editorial
     // playlists can't be started by apps like this one, so prefer others.
     const items = (found?.[kind + 's']?.items || []).filter(Boolean);
     items.sort((x, y) => (x.owner?.id === 'spotify') - (y.owner?.id === 'spotify'));
     if (!items.length) { await speak('I could not find that on Spotify.'); return; }
-    if (!device) { openApp(items[0].uri); location.href = items[0].uri; return; }   // Spotify not running: open it there
+    if (!device) { report({ event: 'spotify-no-device', uri: items[0].uri }); openApp(items[0].uri); location.href = items[0].uri; return; }   // Spotify not running: open it there
     let last;
     for (const item of items.slice(0, 3)) {
-      try { await sp('PUT', '/me/player/play' + q, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri }); return; }
+      try { await sp('PUT', '/me/player/play' + q, kind === 'track' ? { uris: [item.uri] } : { context_uri: item.uri }); report({ event: 'spotify-playing', uri: item.uri, name: item.name }); return; }
       catch (e) { last = e; if (e.status !== 404 && e.status !== 403) break; }
     }
     throw last;
   } catch (e) {
+    report({ event: 'spotify-error', status: e.status, call: e.call, message: e.message });
     await speak(spotifyTrouble(e));
   }
 }
