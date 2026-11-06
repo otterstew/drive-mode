@@ -148,8 +148,13 @@ function lock(msg) {
 function unlock() { $('gate').hidden = true; $('bar').hidden = false; show('app'); }
 $('gateGo').onclick = async () => {
   store.set('key', $('gateKey').value.trim());
-  try { await api('/ping'); unlock(); } catch {}
+  try { await refreshVoices(); unlock(); } catch {}
 };
+
+async function refreshVoices() {
+  const r = await api('/ping');
+  if (Array.isArray(r.voices)) { serverVoices = r.voices; store.set('serverVoices', r.voices); fillVoices(); }
+}
 
 // ---------- Screens ----------
 function show(which) { $('app').hidden = which !== 'app'; $('settings').hidden = which !== 'settings'; }
@@ -213,38 +218,67 @@ let lock_ = null;
 async function wakeLock() { try { if (!lock_ && 'wakeLock' in navigator) { lock_ = await navigator.wakeLock.request('screen'); lock_.onrelease = () => lock_ = null; } } catch {} }
 
 // ---------- Speaking ----------
+// The answer arrives as a recording made on the server (a natural voice,
+// played as ordinary audio so the phone's volume buttons control it). The
+// phone's own voice is the fallback, and a choice in Settings.
 const synth = window.speechSynthesis;
-function voices() { return synth ? synth.getVoices().filter((v) => v.lang && v.lang.startsWith('en')) : []; }
-function pickVoice() {
-  const all = voices(), want = store.get('voice');
-  return all.find((v) => v.name === want) || all.find((v) => v.lang === 'en-GB') || all[0] || null;
+const player = new Audio();
+const DEFAULT_VOICE = 'eleven';
+let serverVoices = store.get('serverVoices', []);
+const voiceChoice = () => store.get('voiceChoice', DEFAULT_VOICE);
+function phoneVoice() {
+  const all = synth ? synth.getVoices().filter((v) => v.lang && v.lang.startsWith('en')) : [];
+  return all.find((v) => v.lang === 'en-GB') || all[0] || null;
 }
-function speak(text) {
+function speakWithPhone(text) {
   return new Promise((resolve) => {
     if (!synth || !text) return resolve();
     synth.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-GB';
+    const v = phoneVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-GB';
     u.rate = Number(store.get('rate', 1));
     u.volume = Number(store.get('volume', 0.6));
     u.onend = u.onerror = () => resolve();
     synth.speak(u);
   });
 }
-function fillVoices() {
-  const sel = $('voice'), want = store.get('voice'), current = pickVoice();
-  sel.innerHTML = '';
-  for (const v of voices()) { const o = new Option(v.name + ' (' + v.lang + ')', v.name); if (v.name === (want || current?.name)) o.selected = true; sel.add(o); }
+// audio: a data: URL from the server, if there is one.
+function speak(text, audio) {
+  if (!audio || voiceChoice() === 'phone') return speakWithPhone(text);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; player.onended = player.onerror = player.onpause = null; resolve(); } };
+    player.onended = finish; player.onpause = finish;
+    player.onerror = () => { done = true; player.onended = player.onerror = player.onpause = null; speakWithPhone(text).then(resolve); };
+    player.src = audio;
+    player.volume = Number(store.get('volume', 0.6));
+    player.playbackRate = Number(store.get('rate', 1));
+    player.play().catch(() => player.onerror && player.onerror());
+  });
 }
-if (synth) synth.onvoiceschanged = fillVoices;
-$('voice').onchange = (e) => store.set('voice', e.target.value);
+function hush() { synth && synth.cancel(); if (!player.paused) player.pause(); }
+function fillVoices() {
+  const sel = $('voice'), want = voiceChoice();
+  sel.innerHTML = '';
+  for (const v of serverVoices) sel.add(new Option(v.label, v.id));
+  sel.add(new Option("The phone's own voice (free, more robotic)", 'phone'));
+  sel.value = [...sel.options].some((o) => o.value === want) ? want : (sel.options[0]?.value || 'phone');
+}
+$('voice').onchange = (e) => store.set('voiceChoice', e.target.value);
 $('rate').onchange = (e) => store.set('rate', Number(e.target.value));
 $('volume').value = String(store.get('volume', 0.6));
-$('volume').onchange = (e) => store.set('volume', Number(e.target.value));
+$('volume').onchange = (e) => { store.set('volume', Number(e.target.value)); player.volume = Number(e.target.value); };
 $('rate').value = String(store.get('rate', 1));
 $('pause').value = store.get('pause', 'normal');
 $('pause').onchange = (e) => store.set('pause', e.target.value);
-$('testVoice').onclick = () => speak('This is how I will sound in the car.');
+$('testVoice').onclick = async () => {
+  const text = 'This is how I will sound in the car.';
+  if (voiceChoice() === 'phone') return speakWithPhone(text);
+  $('testVoice').disabled = true;
+  try { const r = await api('/speak', { text, voice: voiceChoice() }); await speak(text, r.audio); }
+  catch { await speakWithPhone('That voice is not working right now.'); }
+  finally { $('testVoice').disabled = false; }
+};
 
 // ---------- Listening ----------
 // The phone records the audio itself and the server turns it into words
@@ -287,7 +321,7 @@ function onFrame(samples) {
 }
 
 async function listen() {
-  synth && synth.cancel();
+  hush();
   try { await openMic(); if (mic.ctx.state === 'suspended') await mic.ctx.resume(); }
   catch { $('said').textContent = 'Drive mode needs the microphone. Allow it in Chrome\'s site settings.'; setState('idle'); return; }
   recState = { began: performance.now(), floor: 0, spoke: false, lastLoud: 0, chunks: [], rate: mic.ctx.sampleRate };
@@ -302,7 +336,7 @@ function stopListening(send) {
 }
 function stopAll() {
   recState = null;
-  synth && synth.cancel();
+  hush();
   if (state !== 'busy') setState('idle');
 }
 
@@ -330,7 +364,7 @@ function toWav(chunks, rate) {
 $('talk').onclick = () => {
   primeSpeech();
   if (state === 'listening') { recState && (recState.spoke ? stopListening(true) : stopListening(false)); return; }   // send what was heard
-  if (state === 'speaking') { synth.cancel(); listen(); return; }
+  if (state === 'speaking') { hush(); listen(); return; }
   if (state === 'idle') listen();
 };
 let primed = false;
@@ -341,7 +375,7 @@ async function ask(audio) {
   if (!session || Date.now() - session.lastAt > STALE_MS) { if (session) finish(true); newSession(); }
   setState('busy'); $('action').hidden = true; touchIdle();
   let r;
-  try { r = await api('/turn', { mode: 'drive', history: session.history, audio }); }
+  try { r = await api('/turn', { mode: 'drive', history: session.history, audio, voice: voiceChoice() }); }
   catch (e) {
     if (e.message === 'locked') return;
     setState('speaking'); $('said').textContent = 'I cannot reach the server right now.';
@@ -354,7 +388,7 @@ async function ask(audio) {
   addTurn('assistant', r.say + (r.actions || []).map(describe).join(''));
   $('said').textContent = r.say;
   setState('speaking');
-  await speak(r.say);
+  await speak(r.say, r.audio);
   if (state !== 'speaking') return;           // he interrupted
   for (const a of r.actions || []) await act(a);
   if (r.end) { setState('idle'); return finish(false); }
@@ -497,6 +531,7 @@ document.addEventListener('visibilitychange', () => {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   if (!store.get('key')) return lock();
   unlock();
+  refreshVoices().catch(() => {});
   if (await spotifyReturn()) { show('settings'); renderSpotify(); }
   if (session && Date.now() - session.lastAt > STALE_MS) finish(true);    // last trip's notes
   else if (session) { $('state').innerHTML = 'Tap to <em>carry on</em>'; touchIdle(); }
