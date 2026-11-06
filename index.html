@@ -455,7 +455,7 @@ body{display:flex; flex-direction:column; min-height:100dvh}
     <button class="o-btn" id="testVoice">Play a sample</button>
     <label class="o-label" for="pause">How long a pause means you've finished</label>
     <select class="o-field" id="pause">
-      <option value="short">Short (1 second)</option><option value="normal">Normal (2 seconds)</option><option value="long">Long (3 seconds, for thinking out loud)</option>
+      <option value="short">Short (1 second)</option><option value="normal">Normal (1.5 seconds)</option><option value="long">Long (3 seconds, for thinking out loud)</option>
     </select>
   </section>
 
@@ -642,7 +642,7 @@ $('testVoice').onclick = async () => {
 // (better than Chrome's own dictation, which Stewart found poor). A simple
 // level check decides when he has stopped: a pause of PAUSE_MS after speech.
 // Tapping while listening sends straight away.
-const PAUSES = { short: 1200, normal: 2000, long: 3200 };
+const PAUSES = { short: 1000, normal: 1500, long: 3000 };
 const MAX_MS = 90000, WAIT_MS = 9000, RATE = 16000;
 let mic = null, recState = null, quietCount = 0;
 
@@ -687,7 +687,7 @@ async function listen() {
 function stopListening(send) {
   const r = recState; recState = null;
   if (!r || state !== 'listening') return;
-  if (send && r.spoke) return ask(toWav(r.chunks, r.rate));
+  if (send && r.spoke) { heardTone(); return ask(toWav(r.chunks, r.rate)); }
   if (session && ++quietCount < 2) return listen();   // one more chance after a quiet spell
   quietCount = 0; setState('idle');
 }
@@ -695,6 +695,18 @@ function stopAll() {
   recState = null;
   hush();
   if (state !== 'busy') setState('idle');
+}
+
+// A short, quiet two-note tone: "got it, thinking".
+function heardTone() {
+  try {
+    const ctx = mic.ctx, now = ctx.currentTime, g = ctx.createGain();
+    g.connect(ctx.destination);
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.08 * Number(store.get('volume', 0.6)), now + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+    [660, 880].forEach((f, i) => { const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f; o.connect(g); o.start(now + i * 0.1); o.stop(now + 0.1 + i * 0.1 + 0.08); });
+  } catch {}
 }
 
 // Float samples at the phone's rate -> 16 kHz 16-bit mono WAV, base64.
@@ -732,6 +744,7 @@ async function ask(audio) {
   if (!session || Date.now() - session.lastAt > STALE_MS) { if (session) finish(true); newSession(); }
   setState('busy'); $('action').hidden = true; touchIdle();
   let r;
+  const sent = performance.now();
   try { r = await api('/turn', { mode: 'drive', history: session.history, audio, voice: voiceChoice() }); }
   catch (e) {
     if (e.message === 'locked') return;
@@ -743,7 +756,7 @@ async function ask(audio) {
   $('heard').textContent = r.heard;
   addTurn('user', r.heard);
   addTurn('assistant', r.say);
-  report({ event: 'turn', heard: r.heard, said: r.say, actions: r.actions || [] });
+  report({ event: 'turn', heard: r.heard, said: r.say, actions: r.actions || [], server: r.timing, roundTripMs: Math.round(performance.now() - sent), kb: Math.round(audio.length / 1024) });
   $('said').textContent = r.say;
   setState('speaking');
   await speak(r.say, r.audio);
