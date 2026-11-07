@@ -7,10 +7,12 @@ import kotlin.math.PI
 import kotlin.math.min
 import kotlin.math.sin
 
-// Two soft notes. "Heard": he tapped and it has stopped listening.
+// Soft notes. "Listening": he tapped and it is now listening.
+// "Heard": he tapped and it has stopped listening.
 // "Done": a command (music, directions) was carried out without words.
 // "Problem": falling notes; something didn't work (no signal, Spotify refused).
 object Chime {
+    fun listening() = play(floatArrayOf(587f), 0.2f)    // one soft note: "go ahead"
     fun heard() = play(floatArrayOf(660f, 880f), 0.25f)
     fun done() = play(floatArrayOf(784f, 1175f), 0.35f)
     fun problem() = play(floatArrayOf(523f, 392f), 0.35f)

@@ -10,8 +10,8 @@ android {
         applicationId = "com.thewishingstream.drive"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 5
+        versionName = "1.4"
     }
     buildTypes {
         // Signed with this Mac's debug key: its fingerprint is what Spotify's

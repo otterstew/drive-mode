@@ -57,7 +57,7 @@ class DriveService : Service() {
         private const val RATE = 16000
         private const val FRAME = 1024                    // 64 ms
         private const val WAIT_MS = 9000L                 // tapped: give up if nothing is said
-        private const val MAX_MS = 90000L                 // longest single turn
+        private const val MAX_MS = 45000L                 // longest single turn (music can hide the end of speech)
         private const val HANDS_FREE_MAX_MS = 15000L      // hands-free: send at least this often, even over music
         private const val IDLE_FINISH_MS = 10 * 60 * 1000L // write the notes up after 10 quiet minutes
         private const val STALE_MS = 30 * 60 * 1000L       // a conversation older than this is over
@@ -76,7 +76,15 @@ class DriveService : Service() {
     @Volatile private var hush = false
     @Volatile private var interrupted = false   // tapped while it was talking: listen to him next
     private var addressedAt = 0L
-    @Volatile private var testWav: Pair<ByteArray, Boolean>? = null   // the last time something was said to it
+    @Volatile private var testWav: Pair<ByteArray, Boolean>? = null
+    // The background noise level: the quietest moment of the last two
+    // seconds (the gaps between words fall to it), kept from one listen to
+    // the next. The first version measured the first 0.4 s of each listen;
+    // when he was already talking, or its own voice was still echoing, his
+    // voice became "background" and it stopped hearing him.
+    private val recentLevels = ArrayDeque<Double>()
+    private var noise = 0.0
+    private var peak = 0.0   // the last time something was said to it
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -190,6 +198,7 @@ class DriveService : Service() {
     private fun record(tapped: Boolean): Pair<String, Boolean>? {
         testWav?.let { (bytes, t) -> testWav = null; Live.set(State.LISTENING); Thread.sleep(500); return Base64.encodeToString(bytes, Base64.NO_WRAP) to (t || tapped) }
         val handsFree = !tapped
+        if (tapped) Chime.listening()
         Live.set(State.LISTENING, waiting = handsFree && prefs.afterAnswer == "name")
         sendNow = false; switchToTapped = false
         val size = max(AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), FRAME * 4)
@@ -200,7 +209,8 @@ class DriveService : Service() {
         val lead = ArrayDeque<ShortArray>()   // a moment before he started, so the first word isn't clipped
         val kept = ArrayList<ShortArray>()
         val began = System.currentTimeMillis()
-        var floor = 0.0; var spoke = false; var lastLoud = 0L; var tappedMidway = false; var restart = false; var peak = 0.0
+        peak = 0.0
+        var floor = 0.0; var spoke = false; var lastLoud = 0L; var tappedMidway = false; var restart = false
         val pause = prefs.pauseMs
         try {
             rec.startRecording()
@@ -213,26 +223,33 @@ class DriveService : Service() {
                 for (i in 0 until n) { val v = buf[i] / 32768.0; sum += v * v }
                 val level = sqrt(sum / n)
                 peak = max(peak, level)
-                if (now - began < 400) floor = max(floor, level)        // the car's own noise, first moment
-                val loud = level > max(floor * 2.5, 0.012)
+                recentLevels.addLast(level); while (recentLevels.size > 32) recentLevels.removeFirst()
+                noise = recentLevels.min()
+                floor = noise
+                val loud = recentLevels.size >= 4 && level > max(noise * 2, 0.006)
+                Live.level = ((level - noise) / 0.04).coerceIn(0.0, 1.0).toFloat()
                 if (loud) { lastLoud = now; if (!spoke) { spoke = true; kept.addAll(lead); lead.clear() } }
-                if (spoke) kept.add(buf) else { lead.addLast(buf); while (lead.size > 6) lead.removeFirst() }
+                if (spoke) kept.add(buf) else { lead.addLast(buf); while (lead.size > 16) lead.removeFirst() }
 
                 if (switchToTapped) {
                     // Tapped while it was waiting for its name: listen to him properly now.
                     switchToTapped = false
-                    if (spoke) { tappedMidway = true } else { restart = true; break }
+                    if (spoke) { tappedMidway = true; Chime.listening() } else { restart = true; break }
                     Live.set(State.LISTENING)
                 }
-                if (sendNow) return if (spoke) wav(kept) to true else null
+                // A tap sends what it has; with nothing heard yet it keeps listening.
+                if (sendNow) { sendNow = false; if (spoke) return wav(kept) to true }
                 val limit = if (handsFree && !tappedMidway) HANDS_FREE_MAX_MS else MAX_MS
                 if (spoke && now - lastLoud > pause) return wav(kept) to tappedMidway
                 if (!spoke && now - began > WAIT_MS) return null
                 if (now - began > limit) return if (spoke) wav(kept) to tappedMidway else null
             }
         } finally {
-            android.util.Log.d("DriveMode", "listened ${System.currentTimeMillis() - began} ms: floor %.4f peak %.4f spoke $spoke".format(floor, peak))
+            android.util.Log.d("DriveMode", "listened ${System.currentTimeMillis() - began} ms: noise %.4f peak %.4f spoke $spoke".format(floor, peak))
+            // He tapped but nothing counted as speech: report the levels, for tuning.
+            if (tapped && !spoke && running) Api.log(prefs.key, JSONObject().put("event", "unheard").put("noise", floor).put("peak", peak))
             runCatching { rec.stop() }; rec.release()
+            Live.level = 0f
         }
         return if (restart) record(true) else null
     }
@@ -275,7 +292,7 @@ class DriveService : Service() {
         prefs.lastAt = System.currentTimeMillis()
         val actions = r.optJSONArray("actions") ?: JSONArray()
         Api.log(prefs.key, JSONObject().put("event", "turn").put("heard", heard).put("said", say).put("actions", actions)
-            .put("server", r.opt("timing")).put("roundTripMs", System.currentTimeMillis() - sent).put("kb", wav.length / 1024))
+            .put("server", r.opt("timing")).put("roundTripMs", System.currentTimeMillis() - sent).put("kb", wav.length / 1024).put("noise", noise).put("peak", peak))
 
         // A plain command: no words, just a chime, and do it (Stewart: "it
         // should just put the song on"). It only talks for conversation.

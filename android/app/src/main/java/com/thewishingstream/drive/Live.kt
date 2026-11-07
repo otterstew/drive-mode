@@ -12,6 +12,8 @@ object Live {
     @Volatile var state = State.IDLE; private set
     // Listening hands-free, waiting for its name (shown differently).
     @Volatile var waitingForName = false; private set
+    // How loud the microphone is right now, 0 to 1 (above the background), for the orb.
+    @Volatile var level = 0f
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private val main = Handler(Looper.getMainLooper())
 

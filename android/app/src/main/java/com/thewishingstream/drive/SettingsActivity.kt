@@ -195,16 +195,29 @@ class SettingsActivity : Activity() {
         }.start()
     }
 
+    // One sample at a time: taps while it is fetching are ignored (it takes a
+    // second or two), and a tap while one plays stops it and fetches afresh.
+    @Volatile private var fetching = false
+    private var player: MediaPlayer? = null
+    override fun onStop() { player?.release(); player = null; super.onStop() }
+
     private fun sample() {
-        if (prefs.key.isBlank()) return
+        if (prefs.key.isBlank() || fetching) return
+        player?.release(); player = null
+        fetching = true
+        say("Getting the sample\u2026")
         Thread {
             val r = runCatching { Api.call(prefs.key, "/speak", JSONObject().put("text", "Hello Stewart. This is how I'll sound in the car.").put("voice", prefs.voice), 20000) }.getOrNull()
             val url = r?.optString("audio").orEmpty()
-            if (!url.startsWith("data:")) { runOnUiThread { say(r?.optString("error")?.ifBlank { null } ?: "The sample didn't play.") }; return@Thread }
+            if (!url.startsWith("data:")) { fetching = false; runOnUiThread { say(r?.optString("error")?.ifBlank { null } ?: "The sample didn't play.") }; return@Thread }
             val f = File(cacheDir, if (url.startsWith("data:audio/wav")) "sample.wav" else "sample.mp3").apply { writeBytes(Base64.decode(url.substringAfter(","), Base64.DEFAULT)) }
-            MediaPlayer().apply {
-                setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                setDataSource(f.path); setVolume(prefs.volume, prefs.volume); setOnCompletionListener { it.release() }; prepare(); start()
+            runOnUiThread {
+                fetching = false
+                player?.release()
+                player = MediaPlayer().apply {
+                    setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    setDataSource(f.path); setVolume(prefs.volume, prefs.volume); prepare(); start()
+                }
             }
         }.start()
     }
