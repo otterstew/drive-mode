@@ -118,6 +118,8 @@ body{display:flex; flex-direction:column; min-height:100dvh}
 
   <section class="o-panel">
     <h2>This phone</h2>
+    <p>Using the Android app? This passes the key from this page to it, so you don't need the QR code.</p>
+    <button class="o-btn" id="toApp">Unlock the Android app</button>
     <p>Forgetting the key locks drive mode on this phone until you open your link again.</p>
     <button class="o-btn o-btn--danger" id="forget">Forget key</button>
   </section>
@@ -181,6 +183,7 @@ async function refreshVoices() {
 function show(which) { $('app').hidden = which !== 'app'; $('settings').hidden = which !== 'settings'; }
 $('openSettings').onclick = () => { stopAll(); show('settings'); renderSpotify(); };
 $('closeSettings').onclick = () => show('app');
+$('toApp').onclick = () => { location.href = 'drivemode://key?k=' + encodeURIComponent(store.get('key') || ''); };
 $('forget').onclick = () => { store.del('key'); lock('Key forgotten on this phone.'); };
 
 function dateline() {
