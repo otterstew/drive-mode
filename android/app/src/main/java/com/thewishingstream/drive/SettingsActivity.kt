@@ -76,7 +76,8 @@ class SettingsActivity : Activity() {
         step("Spotify", Spotify.signedIn(this), "Paste the client ID from the Spotify developer dashboard, then connect.")
         field(prefs.spotifyClientId, hint = "Spotify client ID") { prefs.spotifyClientId = it }
         button(if (Spotify.signedIn(this)) "Connect Spotify again" else "Connect Spotify") {
-            if (prefs.spotifyClientId.isBlank()) note("Paste the client ID first.") else Spotify.signIn(this)
+            saveFields()   // the box may still have the cursor in it, so save what's typed first
+            if (prefs.spotifyClientId.isBlank()) say("Paste the client ID first.") else Spotify.signIn(this)
         }
 
         heading("Listening", 22)
@@ -102,10 +103,10 @@ class SettingsActivity : Activity() {
                 override fun onStopTrackingTouch(s: SeekBar) {}
             })
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(48)))
-        button("Play a sample") { sample() }
+        button("Play a sample") { saveFields(); if (prefs.key.isBlank()) say("Add the drive key first.") else sample() }
 
         space(24)
-        button("Done", primary = true) { prefs.key = key.text.toString().trim(); finish() }
+        button("Done", primary = true) { saveFields(); prefs.key = key.text.toString().trim(); finish() }
     }
 
     // ---------- Pieces ----------
@@ -118,6 +119,8 @@ class SettingsActivity : Activity() {
         space(8)
     }
     private fun label(text: String) { space(12); col.addView(TextView(this).apply { this.text = text; textSize = 15f; setTextColor(ink); alpha = 0.75f }) }
+    private fun say(text: String) = android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show()
+    private fun saveFields() = fields.forEach { (e, save) -> save(e.text.toString()) }
     private fun note(text: String) { col.addView(TextView(this).apply { this.text = text; textSize = 15f; setTextColor(ochre); setPadding(0, dp(6), 0, dp(6)) }, 1) }
     private fun space(h: Int) = col.addView(View(this), LinearLayout.LayoutParams(MATCH_PARENT, dp(h)))
 
@@ -147,7 +150,7 @@ class SettingsActivity : Activity() {
         return e
     }
     private val fields = mutableListOf<Pair<EditText, (String) -> Unit>>()
-    override fun onPause() { fields.forEach { (e, save) -> save(e.text.toString()) }; super.onPause() }
+    override fun onPause() { saveFields(); super.onPause() }
 
     private fun choice(options: List<Pair<String, String>>, current: String, pick: (String) -> Unit) {
         val g = RadioGroup(this); col.addView(g)
@@ -197,7 +200,7 @@ class SettingsActivity : Activity() {
         Thread {
             val r = runCatching { Api.call(prefs.key, "/speak", JSONObject().put("text", "Hello Stewart. This is how I'll sound in the car.").put("voice", prefs.voice), 20000) }.getOrNull()
             val url = r?.optString("audio").orEmpty()
-            if (!url.startsWith("data:")) { runOnUiThread { note(r?.optString("error")?.ifBlank { null } ?: "The sample didn't play.") }; return@Thread }
+            if (!url.startsWith("data:")) { runOnUiThread { say(r?.optString("error")?.ifBlank { null } ?: "The sample didn't play.") }; return@Thread }
             val f = File(cacheDir, if (url.startsWith("data:audio/wav")) "sample.wav" else "sample.mp3").apply { writeBytes(Base64.decode(url.substringAfter(","), Base64.DEFAULT)) }
             MediaPlayer().apply {
                 setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
