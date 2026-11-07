@@ -17,7 +17,7 @@ class Prefs(ctx: Context) {
     var pauseMs: Long get() = p.getLong("pauseMs", 1500); set(v) = p.edit().putLong("pauseMs", v).apply()
     // How long it keeps listening for its name after the last thing said to it. 0: until stopped.
     var listenMins: Long get() = p.getLong("listenMins", 30); set(v) = p.edit().putLong("listenMins", v).apply()
-    var volume: Float get() = p.getFloat("volume", 0.8f); set(v) = p.edit().putFloat("volume", v).apply()
+    var volume: Float get() = p.getFloat("volume", 0.6f); set(v) = p.edit().putFloat("volume", v).apply()
 
     var spotifyClientId: String get() = str("spClient", ""); set(v) = put("spClient", v.trim())
     var spotifyAccess: String get() = str("spAccess", ""); set(v) = put("spAccess", v)

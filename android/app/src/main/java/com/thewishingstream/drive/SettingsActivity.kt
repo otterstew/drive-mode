@@ -154,11 +154,15 @@ class SettingsActivity : Activity() {
         options.forEach { (id, l) -> radio(g, id, l, current) { pick(id) } }
     }
     private fun radio(g: RadioGroup, id: String, label: String, current: String, pick: () -> Unit) {
-        g.addView(RadioButton(this).apply {
+        // Each button needs its own view id, or the group can't untick the others.
+        val b = RadioButton(this).apply {
+            this.id = View.generateViewId()
             text = label; textSize = 16f; setTextColor(ink); buttonTintList = android.content.res.ColorStateList.valueOf(ochre)
-            isChecked = id == current; tag = id; minHeight = dp(44)
+            tag = id; minHeight = dp(44)
             setOnClickListener { pick() }
-        })
+        }
+        g.addView(b)
+        if (id == current) g.check(b.id)
     }
 
     private fun button(text: String, primary: Boolean = false, go: () -> Unit) {
