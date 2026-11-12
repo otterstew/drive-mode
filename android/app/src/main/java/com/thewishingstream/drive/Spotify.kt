@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit
 // Spotify developer app, so those must be registered on its dashboard.
 object Spotify {
     const val REDIRECT = "drivemode://callback"
+    const val PACKAGE = "com.spotify.music"
     private const val SCOPES = "user-modify-playback-state user-read-playback-state app-remote-control"
     @Volatile private var remote: SpotifyAppRemote? = null
 
@@ -88,38 +89,82 @@ object Spotify {
 
     // ---- Playing (App Remote). Blocking: waits for Spotify to answer. ----
 
-    fun connect(ctx: Context, showAuth: Boolean = false): SpotifyAppRemote {
+    // timeoutS was 20 s: with Spotify closed, App Remote just waits, so he
+    // heard nothing for 20 s and then the problem chime (7 Nov logs: "Spotify
+    // didn't answer", twice). Now it gives up quickly and wakes Spotify.
+    fun connect(ctx: Context, showAuth: Boolean = false, timeoutS: Long = 6): SpotifyAppRemote {
         remote?.takeIf { it.isConnected && !showAuth }?.let { return it }
         val prefs = Prefs(ctx)
         val params = ConnectionParams.Builder(prefs.spotifyClientId).setRedirectUri(REDIRECT).showAuthView(showAuth).build()
         val done = CountDownLatch(1)
         var failure: Throwable? = null
         android.os.Handler(android.os.Looper.getMainLooper()).post {
+            remote?.let { runCatching { SpotifyAppRemote.disconnect(it) } }
             SpotifyAppRemote.connect(if (showAuth) ctx else ctx.applicationContext, params, object : Connector.ConnectionListener {
                 override fun onConnected(r: SpotifyAppRemote) { remote = r; done.countDown() }
                 override fun onFailure(t: Throwable) { failure = t; done.countDown() }
             })
         }
-        if (!done.await(20, TimeUnit.SECONDS)) throw Exception("Spotify didn't answer")
+        if (!done.await(timeoutS, TimeUnit.SECONDS)) throw Exception("Spotify didn't answer")
         failure?.let { throw Exception("Spotify: " + (it.message ?: it.javaClass.simpleName), it) }
         return remote!!
     }
 
-    fun command(ctx: Context, command: String, uri: String? = null) {
-        val player = connect(ctx).playerApi
+    // Connect in the background when drive mode starts, so the first song
+    // doesn't wait for the connection. Failure here is fine: it is tried
+    // again (and Spotify woken) when he asks for music.
+    fun warmUp(ctx: Context) {
+        if (Prefs(ctx).spotifyClientId.isBlank()) return
+        Thread { runCatching { connect(ctx, timeoutS = 8) } }.start()
+    }
+
+    // App Remote can't reach Spotify when Spotify has been closed (Stewart,
+    // 7 Nov: "when it's been closed it's not playing"). Opening Spotify
+    // starts it; App Remote then connects in a second or two. Returns true if
+    // Spotify was opened (it is now in front of the drive screen).
+    private fun wake(ctx: Context, uri: String?): Boolean {
+        val canOpen = Live.screenVisible || android.provider.Settings.canDrawOverlays(ctx)
+        if (!canOpen) throw Exception("Spotify is closed and Drive isn't allowed to open apps from the background (Drive's settings: display over other apps)")
+        val open = (uri?.let { Intent(Intent.ACTION_VIEW, Uri.parse(it)).setPackage(PACKAGE) }
+            ?: ctx.packageManager.getLaunchIntentForPackage(PACKAGE))
+            ?: throw Exception("Spotify isn't installed")
+        ctx.startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        return true
+    }
+
+    // Connects, waking Spotify if it doesn't answer. Returns the remote and
+    // whether Spotify had to be opened.
+    private fun connectOrWake(ctx: Context, uri: String?): Pair<SpotifyAppRemote, Boolean> {
+        try { return connect(ctx) to false } catch (first: Exception) {
+            android.util.Log.d("DriveMode", "Spotify not answering (${first.message}); opening it")
+            wake(ctx, uri)
+            var last: Exception = first
+            repeat(4) {   // up to ~16 s while Spotify starts
+                Thread.sleep(1500)
+                try { return connect(ctx, timeoutS = 3) to true } catch (e: Exception) { last = e }
+            }
+            throw last
+        }
+    }
+
+    // Returns true if Spotify had to be opened to do it.
+    fun command(ctx: Context, command: String, uri: String? = null): Boolean {
+        val (r, opened) = connectOrWake(ctx, if (command == "play") uri else null)
+        val player = r.playerApi
         val result = when (command) {
             "play" -> player.play(uri)
             "pause" -> player.pause()
             "resume" -> player.resume()
             "next" -> player.skipNext()
             "previous" -> player.skipPrevious()
-            else -> return
+            else -> return opened
         }
         val done = CountDownLatch(1)
         var failure: Throwable? = null
         result.setResultCallback { done.countDown() }.setErrorCallback { failure = it; done.countDown() }
-        done.await(10, TimeUnit.SECONDS)
+        if (!done.await(8, TimeUnit.SECONDS)) throw Exception("Spotify didn't confirm $command")
         failure?.let { throw Exception("Spotify: " + (it.message ?: it.javaClass.simpleName)) }
+        return opened
     }
 
     private fun b64(bytes: ByteArray) = Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)

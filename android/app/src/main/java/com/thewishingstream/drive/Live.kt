@@ -14,6 +14,9 @@ object Live {
     @Volatile var waitingForName = false; private set
     // How loud the microphone is right now, 0 to 1 (above the background), for the orb.
     @Volatile var level = 0f
+    // The drive screen is in front. Android lets the app open Maps or Spotify
+    // then even without "display over other apps".
+    @Volatile var screenVisible = false
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private val main = Handler(Looper.getMainLooper())
 

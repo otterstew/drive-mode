@@ -25,7 +25,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
@@ -116,6 +115,7 @@ class DriveService : Service() {
         wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "drive:listening").apply { acquire(6 * 60 * 60 * 1000L) }
         running = true
         addressedAt = System.currentTimeMillis()
+        Spotify.warmUp(this)
         worker = Thread({ runCatching { retryPending() }; loop(tapped = true) }, "drive").also { it.start() }
     }
 
@@ -296,9 +296,17 @@ class DriveService : Service() {
 
         // A plain command: no words, just a chime, and do it (Stewart: "it
         // should just put the song on"). It only talks for conversation.
-        if (r.optBoolean("quiet")) Chime.done()
-        else speak(r.optString("audio"))
-        for (i in 0 until actions.length()) act(actions.getJSONObject(i))
+        // The chime comes after it's done, and only if it worked: it used to
+        // chime first, then play the problem notes 20 s later when Spotify
+        // didn't answer.
+        if (r.optBoolean("quiet")) {
+            var ok = true
+            for (i in 0 until actions.length()) ok = act(actions.getJSONObject(i)) && ok
+            if (ok) Chime.done()
+        } else {
+            speak(r.optString("audio"))
+            for (i in 0 until actions.length()) act(actions.getJSONObject(i))
+        }
 
         if (r.optBoolean("end")) { addressedAt = 0; Live.set(State.IDLE); finishSession() }
     }
@@ -335,51 +343,68 @@ class DriveService : Service() {
 
     // ---------------- Doing things on the phone ----------------
 
-    private fun act(a: JSONObject) {
-        when (a.optString("type")) {
-            "directions" -> directions(a.optString("destination"))
-            "music" -> music(a)
-        }
+    // Each returns true if it worked (failures play the problem notes themselves).
+    private fun act(a: JSONObject): Boolean = when (a.optString("type")) {
+        "directions" -> directions(a.optString("destination"))
+        "music" -> music(a)
+        else -> true
     }
 
-    private fun directions(dest: String) {
-        if (dest.isBlank()) return
-        val i = Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=" + URLEncoder.encode(dest, "UTF-8") + "&mode=d"))
-            .setPackage("com.google.android.apps.maps").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    private fun canOpenApps() = Live.screenVisible || Settings.canDrawOverlays(this)
+
+    private fun directions(dest: String): Boolean {
+        if (dest.isBlank()) return false
+        val nav = Uri.parse("google.navigation:q=" + Uri.encode(dest) + "&mode=d")
         // From the background, Android only lets it open Maps with the
-        // "display over other apps" permission (asked for in Settings).
-        if (!Settings.canDrawOverlays(this)) {
+        // "display over other apps" permission (asked for in Settings). With
+        // the drive screen in front it needs nothing.
+        if (!canOpenApps()) {
             outcome("Maps: could not open directions to $dest, because the app isn't allowed to open other apps from the background. Tell him to allow it in Drive's settings.")
-            Chime.problem(); return
+            Chime.problem(); return false
         }
-        try { startActivity(i); outcome("Maps: opened directions to $dest.") }
-        catch (e: Exception) { outcome("Maps: could not open directions to $dest (${e.message})."); Chime.problem() }
+        return try {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, nav).setPackage("com.google.android.apps.maps").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: android.content.ActivityNotFoundException) {
+                // Maps missing or disabled: any app that can search a place.
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(dest))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            outcome("Maps: opened directions to $dest."); true
+        } catch (e: Exception) { outcome("Maps: could not open directions to $dest (${e.message})."); Chime.problem(); false }
     }
 
-    private fun music(a: JSONObject) {
+    private fun music(a: JSONObject): Boolean {
         val command = a.optString("command")
         val query = a.optString("query")
-        try {
+        val wasInFront = Live.screenVisible
+        val began = System.currentTimeMillis()
+        return try {
+            val opened: Boolean
             if (command == "play" && query.isNotBlank()) {
                 val (uri, name) = Spotify.search(this, query, a.optString("kind").ifBlank { "track" })
-                    ?: run { outcome("Spotify: found nothing for \"$query\"."); Chime.problem(); return }
-                Spotify.command(this, "play", uri)
+                    ?: run { outcome("Spotify: found nothing for \"$query\"."); Chime.problem(); return false }
+                opened = Spotify.command(this, "play", uri)
                 outcome("Spotify: playing \"$name\". Confirmed by Spotify.")
-                Api.log(prefs.key, JSONObject().put("event", "spotify-playing").put("uri", uri).put("name", name))
+                Api.log(prefs.key, JSONObject().put("event", "spotify-playing").put("uri", uri).put("name", name).put("woke", opened).put("ms", System.currentTimeMillis() - began))
             } else {
-                Spotify.command(this, if (command == "play") "resume" else command)
+                opened = Spotify.command(this, if (command == "play") "resume" else command)
                 outcome("Spotify: $command done. Confirmed by Spotify.")
             }
+            // Spotify had to be opened to wake it: put the drive screen back.
+            if (opened && wasInFront) startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+            true
         } catch (e: Exception) {
             outcome("Spotify: $command${if (query.isNotBlank()) " \"$query\"" else ""} failed (${e.message}).")
-            Api.log(prefs.key, JSONObject().put("event", "spotify-error").put("command", command).put("error", e.message))
+            Api.log(prefs.key, JSONObject().put("event", "spotify-error").put("command", command).put("error", e.message).put("ms", System.currentTimeMillis() - began))
             Chime.problem()
+            false
         }
     }
 
     // What really happened, so the AI never claims something that didn't.
     private fun outcome(text: String) {
         android.util.Log.d("DriveMode", "outcome: $text")
+        Api.log(prefs.key, JSONObject().put("event", "outcome").put("text", text))   // so Maps problems show in the logs too
         val t = SimpleDateFormat("HH:mm", Locale.UK).format(Date())
         val recent = prefs.recent
         recent.put("$t $text")

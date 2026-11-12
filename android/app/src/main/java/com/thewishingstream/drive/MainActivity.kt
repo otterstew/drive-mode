@@ -33,11 +33,12 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        Live.screenVisible = true
         Live.listen(redraw); orb.invalidate()
         if (!SettingsActivity.ready(this)) startActivity(Intent(this, SettingsActivity::class.java))
     }
 
-    override fun onPause() { Live.unlisten(redraw); super.onPause() }
+    override fun onPause() { Live.screenVisible = false; Live.unlisten(redraw); super.onPause() }
 
     private fun tap() {
         if (!SettingsActivity.ready(this)) { startActivity(Intent(this, SettingsActivity::class.java)); return }
