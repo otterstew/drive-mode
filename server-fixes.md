@@ -1,9 +1,10 @@
 # Server fixes for drive mode (12 Nov 2026)
 
-These go in the `drive-mode` Supabase function, `supabase/functions/drive-mode/index.ts`
-in the open-brain repo. This session couldn't reach that repo, so the changes are written
-out here, then deployed with `supabase functions deploy drive-mode`. Delete this file
-once they're in.
+**Deployed 12 Nov 2026 as drive-mode version 22** (straight to Supabase, on top of
+version 21). They still need copying into `supabase/functions/drive-mode/index.ts` in
+the open-brain repo: this session couldn't reach that repo, and the next
+`supabase functions deploy drive-mode` from the repo would otherwise undo them.
+Delete this file once they're in.
 
 What the 7 Nov logs showed:
 
